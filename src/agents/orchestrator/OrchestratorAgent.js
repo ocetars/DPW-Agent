@@ -4,16 +4,29 @@
  * - 接收用户请求
  * - 调度 RAG / Planner / Executor
  * - 管理多轮对话上下文
+ * 
+ * 架构说明：
+ * ┌─────────────────────────────────────────────────────────────────┐
+ * │                    DPW-Agent 多 Agent 架构                       │
+ * ├─────────────────────────────────────────────────────────────────┤
+ * │                                                                 │
+ * │  User Request ──► Orchestrator ──┬──► RAG Agent                │
+ * │                                  ├──► Planner Agent            │
+ * │                                  └──► Executor Agent           │
+ * │                                                                 │
+ * └─────────────────────────────────────────────────────────────────┘
  */
 
 import { AgentClient } from '../../a2a/AgentClient.js';
 import { DEFAULT_PORTS, getAgentUrl } from '../definitions.js';
 import { createLogger } from '../../utils/logger.js';
+import { getStreamLogger, AgentName } from '../../utils/StreamLogger.js';
 import { v4 as uuidv4 } from 'uuid';
 
 export class OrchestratorAgent {
   constructor(config = {}) {
     this.logger = createLogger('OrchestratorAgent');
+    this.streamLogger = getStreamLogger();
     
     // A2A Client 用于调用其他 Agent
     this.a2aClient = new AgentClient('Orchestrator');
@@ -73,52 +86,75 @@ export class OrchestratorAgent {
   async chat(request) {
     const startTime = Date.now();
     const { message, sessionId = uuidv4(), mapId, filters = {} } = request;
+    const requestId = uuidv4(); // 用于日志追踪
 
-    this.logger.info(`[${sessionId}] Processing: "${message.substring(0, 50)}..."`);
+    // ===== 流式日志：请求开始 =====
+    this.streamLogger.requestStart(requestId, message, sessionId);
+    // this.logger.info(`[${sessionId}] Processing: "${message.substring(0, 50)}..."`);
 
     // 获取或创建会话
     const session = this._getOrCreateSession(sessionId);
     session.history.push({ role: 'user', content: message, timestamp: Date.now() });
 
     try {
-      // 1. RAG 检索
+      // ===== 阶段 1: RAG 检索 =====
       let ragHits = [];
       let ragResult = null;
       
       if (this.config.ragEnabled) {
         try {
+          this.streamLogger.agentCallStart(requestId, AgentName.RAG, 'retrieve', { query: message.substring(0, 50) });
+          const ragStartTime = Date.now();
+          
           ragResult = await this._callRag(message, { mapId, ...filters }, sessionId);
           ragHits = ragResult.output?.hits || [];
-          this.logger.info(`[${sessionId}] RAG returned ${ragHits.length} hits`);
+          
+          this.streamLogger.ragResult(requestId, ragHits, Date.now() - ragStartTime);
+          this.streamLogger.agentCallEnd(requestId, AgentName.RAG, 'retrieve', { hitCount: ragHits.length }, Date.now() - ragStartTime);
+          // this.logger.info(`[${sessionId}] RAG returned ${ragHits.length} hits`);
         } catch (error) {
+          this.streamLogger.agentCallError(requestId, AgentName.RAG, 'retrieve', error);
           this.logger.warn(`[${sessionId}] RAG failed, continuing without context:`, error.message);
         }
       }
 
-      // 1.5 获取无人机状态（用于相对移动/默认高度等；失败则忽略）
+      // ===== 阶段 1.5: 获取无人机状态 =====
       let droneState = null;
       try {
+        this.streamLogger.agentCallStart(requestId, AgentName.EXECUTOR, 'getState', {});
+        const stateStartTime = Date.now();
+        
         const stateResult = await this._callExecutorGetState(sessionId);
         if (stateResult?.success) {
           droneState = stateResult.output;
+          this.streamLogger.agentCallEnd(requestId, AgentName.EXECUTOR, 'getState', { position: droneState?.position }, Date.now() - stateStartTime);
         }
       } catch (error) {
+        this.streamLogger.agentCallError(requestId, AgentName.EXECUTOR, 'getState', error);
         this.logger.warn(`[${sessionId}] Failed to get drone state, continuing without it:`, error.message);
       }
 
-      // 2. 规划
+      // ===== 阶段 2: 规划 =====
+      this.streamLogger.agentCallStart(requestId, AgentName.PLANNER, 'plan', { ragHitsCount: ragHits.length });
+      this.streamLogger.plannerStart(requestId, message);
+      const planStartTime = Date.now();
+      
       const planResult = await this._callPlanner(message, ragHits, droneState, session, sessionId);
       
       if (!planResult.success) {
+        this.streamLogger.agentCallError(requestId, AgentName.PLANNER, 'plan', new Error(planResult.error));
         throw new Error(planResult.error || 'Planning failed');
       }
 
       const plan = planResult.output;
+      this.streamLogger.plannerResult(requestId, plan, Date.now() - planStartTime);
+      this.streamLogger.agentCallEnd(requestId, AgentName.PLANNER, 'plan', { stepCount: plan.steps?.length || 0 }, Date.now() - planStartTime);
 
-      // 3. 如果需要澄清，直接返回
+      // ===== 阶段 3: 如果需要澄清，直接返回 =====
       if (plan.needsClarification) {
         const response = {
           sessionId,
+          requestId,
           answer: plan.clarificationQuestion || '请提供更多信息',
           plan: null,
           toolCalls: [],
@@ -128,30 +164,40 @@ export class OrchestratorAgent {
         };
 
         session.history.push({ role: 'assistant', content: response.answer, timestamp: Date.now() });
+        this.streamLogger.requestEnd(requestId, response);
         return response;
       }
 
-      // 4. 执行
+      // ===== 阶段 4: 执行 =====
       let executionResult = null;
       const toolCalls = [];
 
       if (plan.steps && plan.steps.length > 0) {
-        executionResult = await this._callExecutor(plan.steps, sessionId);
+        this.streamLogger.agentCallStart(requestId, AgentName.EXECUTOR, 'execute', { stepCount: plan.steps.length });
+        this.streamLogger.executorStart(requestId, plan.steps);
+        const execStartTime = Date.now();
+        
+        // 使用带回调的执行方法
+        executionResult = await this._callExecutorWithProgress(plan.steps, sessionId, requestId);
         
         if (executionResult.success) {
           toolCalls.push(...(executionResult.output?.results || []));
         }
+        
+        this.streamLogger.executorResult(requestId, executionResult.output || {});
+        this.streamLogger.agentCallEnd(requestId, AgentName.EXECUTOR, 'execute', { allSuccess: executionResult.output?.allSuccess }, Date.now() - execStartTime);
       }
 
-      // 5. 生成回答
+      // ===== 阶段 5: 生成回答 =====
       const answer = this._generateAnswer(plan, executionResult);
 
-      // 6. 记录到历史
+      // ===== 阶段 6: 记录到历史 =====
       session.history.push({ role: 'assistant', content: answer, timestamp: Date.now() });
       this._trimHistory(session);
 
       const response = {
         sessionId,
+        requestId,
         answer,
         plan: plan.steps,
         reasoning: plan.reasoning,
@@ -161,6 +207,8 @@ export class OrchestratorAgent {
         durationMs: Date.now() - startTime,
       };
 
+      // ===== 流式日志：请求结束 =====
+      this.streamLogger.requestEnd(requestId, response);
       this.logger.info(`[${sessionId}] Completed in ${response.durationMs}ms`);
       return response;
 
@@ -169,12 +217,14 @@ export class OrchestratorAgent {
       
       const errorResponse = {
         sessionId,
+        requestId,
         answer: `抱歉，处理您的请求时出错：${error.message}`,
         error: error.message,
         durationMs: Date.now() - startTime,
       };
 
       session.history.push({ role: 'assistant', content: errorResponse.answer, timestamp: Date.now() });
+      this.streamLogger.requestEnd(requestId, errorResponse);
       return errorResponse;
     }
   }
@@ -221,6 +271,45 @@ export class OrchestratorAgent {
       steps,
       stopOnError: true,
     }, { sessionId, timeout: 120000 });
+  }
+
+  /**
+   * 调用 Executor Agent（带进度回调）
+   * @private
+   */
+  async _callExecutorWithProgress(steps, sessionId, requestId) {
+    // 为每个步骤发送进度事件
+    const result = await this.a2aClient.submitTask('executor', 'execute', {
+      steps,
+      stopOnError: true,
+    }, { sessionId, timeout: 120000 });
+
+    // 如果执行成功，回放步骤日志（因为 A2A 调用是同步的）
+    // 同时发送步骤开始和结束事件，让日志更完整
+    if (result.success && result.output?.results) {
+      for (let i = 0; i < result.output.results.length; i++) {
+        const stepResult = result.output.results[i];
+        const step = steps[i];
+        
+        // 发送步骤开始事件
+        this.streamLogger.executorStepStart(requestId, i, {
+          tool: stepResult.tool || step?.tool,
+          args: stepResult.args || step?.args,
+          description: stepResult.description || step?.description,
+        });
+        
+        // 发送步骤结束事件
+        this.streamLogger.executorStepEnd(
+          requestId, 
+          i, 
+          stepResult.success, 
+          stepResult.durationMs, 
+          stepResult.error
+        );
+      }
+    }
+
+    return result;
   }
 
   /**

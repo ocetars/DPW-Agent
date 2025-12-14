@@ -2,6 +2,8 @@
 /**
  * DPW-Agent CLI
  * 命令行交互界面
+ * 
+ * 支持流式日志输出，实时展示 Agent 调用链路
  */
 
 import 'dotenv/config';
@@ -9,8 +11,10 @@ import readline from 'readline';
 import { v4 as uuidv4 } from 'uuid';
 import { OrchestratorAgent } from '../agents/orchestrator/OrchestratorAgent.js';
 import { createLogger } from '../utils/logger.js';
+import { getStreamLogger, LogEventType, AgentName } from '../utils/StreamLogger.js';
 
 const logger = createLogger('CLI');
+const streamLogger = getStreamLogger();
 
 // ANSI 颜色
 const colors = {
@@ -22,6 +26,27 @@ const colors = {
   blue: '\x1b[34m',
   cyan: '\x1b[36m',
   red: '\x1b[31m',
+  magenta: '\x1b[35m',
+  bgBlue: '\x1b[44m',
+  bgGreen: '\x1b[42m',
+  bgYellow: '\x1b[43m',
+  bgMagenta: '\x1b[45m',
+};
+
+// Agent 颜色映射
+const agentColors = {
+  [AgentName.ORCHESTRATOR]: colors.cyan,
+  [AgentName.RAG]: colors.magenta,
+  [AgentName.PLANNER]: colors.yellow,
+  [AgentName.EXECUTOR]: colors.green,
+};
+
+// Agent 图标映射
+const agentIcons = {
+  [AgentName.ORCHESTRATOR]: '🎯',
+  [AgentName.RAG]: '🔍',
+  [AgentName.PLANNER]: '📋',
+  [AgentName.EXECUTOR]: '⚙️',
 };
 
 function print(text, color = '') {
@@ -35,19 +60,260 @@ function printHeader() {
   print('║          A2A + RAG + MCP 多Agent系统                        ║', colors.cyan);
   print('╚════════════════════════════════════════════════════════════╝', colors.cyan);
   console.log('');
+  print('架构说明:', colors.dim);
+  print('  Orchestrator ──┬──► RAG Agent (向量检索)', colors.dim);
+  print('                 ├──► Planner Agent (LLM规划)', colors.dim);
+  print('                 └──► Executor Agent (MCP执行)', colors.dim);
+  console.log('');
   print('命令：', colors.dim);
   print('  /help    - 显示帮助', colors.dim);
   print('  /status  - 检查系统状态', colors.dim);
   print('  /clear   - 清除会话历史', colors.dim);
+  print('  /stream  - 切换流式日志显示', colors.dim);
   print('  /quit    - 退出', colors.dim);
   console.log('');
 }
+
+/**
+ * 获取时间戳字符串
+ */
+function getTimeStr() {
+  return new Date().toLocaleTimeString('zh-CN', { 
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+/**
+ * 打印流向箭头
+ */
+function printFlow(from, to, action = '') {
+  const fromIcon = agentIcons[from] || '📌';
+  const toIcon = agentIcons[to] || '📌';
+  const fromColor = agentColors[from] || colors.dim;
+  const toColor = agentColors[to] || colors.dim;
+  const actionStr = action ? ` ${colors.dim}(${action})${colors.reset}` : '';
+  
+  console.log(
+    `${colors.dim}[${getTimeStr()}]${colors.reset} ` +
+    `${fromIcon} ${fromColor}${from}${colors.reset} ` +
+    `${colors.yellow}──▶${colors.reset} ` +
+    `${toIcon} ${toColor}${to}${colors.reset}` +
+    actionStr
+  );
+}
+
+/**
+ * 打印返回箭头
+ */
+function printReturn(from, to, result = '', durationMs = null) {
+  const fromIcon = agentIcons[from] || '📌';
+  const toIcon = agentIcons[to] || '📌';
+  const fromColor = agentColors[from] || colors.dim;
+  const toColor = agentColors[to] || colors.dim;
+  const timeStr = durationMs ? ` ${colors.dim}(${durationMs}ms)${colors.reset}` : '';
+  const resultStr = result ? ` ${colors.dim}${result}${colors.reset}` : '';
+  
+  console.log(
+    `${colors.dim}[${getTimeStr()}]${colors.reset} ` +
+    `${fromIcon} ${fromColor}${from}${colors.reset} ` +
+    `${colors.green}◀──${colors.reset} ` +
+    `${toIcon} ${toColor}${to}${colors.reset}` +
+    resultStr + timeStr
+  );
+}
+
+/**
+ * 打印详细信息块
+ */
+function printDetailBlock(title, items, indent = '    ') {
+  console.log(`${indent}${colors.cyan}┌─ ${title}${colors.reset}`);
+  for (const item of items) {
+    console.log(`${indent}${colors.dim}│${colors.reset}  ${item}`);
+  }
+  console.log(`${indent}${colors.dim}└─────────────────────${colors.reset}`);
+}
+
+/**
+ * 打印 Agent 操作
+ */
+function printAgentAction(agent, action, detail = '') {
+  const icon = agentIcons[agent] || '📌';
+  const color = agentColors[agent] || colors.dim;
+  const detailStr = detail ? ` ${colors.dim}${detail}${colors.reset}` : '';
+  
+  console.log(
+    `${colors.dim}[${getTimeStr()}]${colors.reset} ` +
+    `${icon} ${color}[${agent}]${colors.reset} ` +
+    `${action}${detailStr}`
+  );
+}
+
+/**
+ * 格式化流式日志输出 - 详细版
+ */
+function handleStreamEvent(event) {
+  switch (event.type) {
+    // ===== 请求开始 =====
+    case LogEventType.REQUEST_START:
+      console.log('');
+      printAgentAction(
+        AgentName.ORCHESTRATOR, 
+        `${colors.bright}接收用户请求${colors.reset}`,
+        `"${event.message?.substring(0, 50)}"`
+      );
+      break;
+
+    // ===== RAG 调用 =====
+    case LogEventType.AGENT_CALL_START:
+      if (event.agent === AgentName.RAG) {
+        console.log('');
+        printFlow(AgentName.ORCHESTRATOR, AgentName.RAG, '向量检索');
+        printAgentAction(AgentName.RAG, '查询 Supabase 向量数据库...');
+      } else if (event.agent === AgentName.PLANNER) {
+        console.log('');
+        printFlow(AgentName.ORCHESTRATOR, AgentName.PLANNER, 'LLM 规划');
+        printAgentAction(AgentName.PLANNER, '调用 Gemini 生成执行计划...');
+      } else if (event.agent === AgentName.EXECUTOR && event.action === 'execute') {
+        console.log('');
+        printFlow(AgentName.ORCHESTRATOR, AgentName.EXECUTOR, '执行任务');
+      }
+      break;
+
+    // ===== RAG 结果 =====
+    case LogEventType.RAG_RESULT:
+      if (event.hitCount > 0 && event.topHits) {
+        const items = event.topHits.map((h, i) => 
+          `${colors.yellow}#${i + 1}${colors.reset} ${h.text}... ${colors.dim}(${(h.score * 100).toFixed(0)}%)${colors.reset}`
+        );
+        printDetailBlock(`检索到 ${event.hitCount} 个匹配点位`, items);
+      } else {
+        printAgentAction(AgentName.RAG, '未找到匹配点位');
+      }
+      printReturn(AgentName.ORCHESTRATOR, AgentName.RAG, `${event.hitCount} 条结果`, event.durationMs);
+      break;
+
+    // ===== Planner 结果 =====
+    case LogEventType.PLANNER_RESULT:
+      // 显示推理过程
+      if (event.reasoning) {
+        console.log(`${colors.dim}    └─ 推理: ${event.reasoning}${colors.reset}`);
+      }
+      
+      if (event.steps && event.steps.length > 0) {
+        const items = event.steps.map((s, i) => {
+          let argsStr = '';
+          if (s.args && Object.keys(s.args).length > 0) {
+            argsStr = ` ${colors.dim}(${Object.entries(s.args).map(([k,v]) => `${k}=${JSON.stringify(v)}`).join(', ')})${colors.reset}`;
+          }
+          return `${colors.yellow}Step ${i + 1}:${colors.reset} ${colors.green}${s.tool}${colors.reset}${argsStr}`;
+        });
+        printDetailBlock(`生成 ${event.stepCount} 步执行计划`, items);
+      } else if (event.needsClarification) {
+        printAgentAction(AgentName.PLANNER, '需要澄清用户意图');
+      }
+      printReturn(AgentName.ORCHESTRATOR, AgentName.PLANNER, `${event.stepCount} 个步骤`, event.durationMs);
+      break;
+
+    // ===== Executor 开始 =====
+    case LogEventType.EXECUTOR_START:
+      printAgentAction(AgentName.EXECUTOR, `开始执行 ${event.totalSteps} 个步骤`);
+      break;
+
+    // ===== Executor 步骤开始 =====
+    case LogEventType.EXECUTOR_STEP_START:
+      console.log('');
+      printFlow(AgentName.EXECUTOR, 'MCP', `Step ${event.stepIndex + 1}: ${event.tool}`);
+      if (event.args && Object.keys(event.args).length > 0) {
+        const argsStr = Object.entries(event.args)
+          .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+          .join(', ');
+        console.log(`${colors.dim}    └─ 参数: ${argsStr}${colors.reset}`);
+      }
+      if (event.description) {
+        console.log(`${colors.dim}    └─ ${event.description}${colors.reset}`);
+      }
+      break;
+
+    // ===== Executor 步骤结束 =====
+    case LogEventType.EXECUTOR_STEP_END:
+      if (event.success) {
+        printReturn(AgentName.EXECUTOR, 'MCP', `${colors.green}✓ 成功${colors.reset}`, event.durationMs);
+      } else {
+        printReturn(AgentName.EXECUTOR, 'MCP', `${colors.red}✗ 失败: ${event.error}${colors.reset}`, event.durationMs);
+      }
+      break;
+
+    // ===== Executor 完成 =====
+    case LogEventType.EXECUTOR_RESULT:
+      console.log('');
+      printReturn(
+        AgentName.ORCHESTRATOR, 
+        AgentName.EXECUTOR, 
+        `${event.completedSteps}/${event.totalSteps} 步骤完成`, 
+        event.durationMs
+      );
+      break;
+
+    // ===== 请求结束 =====
+    case LogEventType.REQUEST_END:
+      console.log('');
+      printAgentAction(
+        AgentName.ORCHESTRATOR, 
+        `${colors.bright}${event.success ? '✅ 请求处理完成' : '❌ 请求处理失败'}${colors.reset}`,
+        `总耗时 ${event.durationMs}ms`
+      );
+      break;
+
+    // ===== 错误 =====
+    case LogEventType.AGENT_CALL_ERROR:
+      printAgentAction(event.agent, `${colors.red}✗ 错误: ${event.error}${colors.reset}`);
+      break;
+  }
+}
+
+// 流式日志开关
+let streamLoggingEnabled = true;
+
+// MCP 图标（用于展示与 MCP Server 的交互）
+agentIcons['MCP'] = '🔌';
+agentColors['MCP'] = colors.blue;
 
 async function main() {
   printHeader();
 
   // 创建 Orchestrator（直接使用，不需要 A2A Server）
   const orchestrator = new OrchestratorAgent();
+
+  // ===== 订阅流式日志事件 =====
+  let currentRequestId = null;
+  
+  streamLogger.on('*', (event) => {
+    if (!streamLoggingEnabled) return;
+    if (!currentRequestId) return;
+    if (event.requestId !== currentRequestId) return;
+    
+    // 只处理我们关心的事件类型
+    const showEvents = [
+      LogEventType.REQUEST_START,
+      LogEventType.AGENT_CALL_START,
+      LogEventType.AGENT_CALL_ERROR,
+      LogEventType.RAG_RESULT,
+      LogEventType.PLANNER_RESULT,
+      LogEventType.EXECUTOR_START,
+      LogEventType.EXECUTOR_STEP_START,
+      LogEventType.EXECUTOR_STEP_END,
+      LogEventType.EXECUTOR_RESULT,
+      LogEventType.REQUEST_END,
+    ];
+    
+    if (!showEvents.includes(event.type)) return;
+    
+    // 使用详细格式处理事件
+    handleStreamEvent(event);
+  });
 
   // 检查依赖
   print('正在检查系统状态...', colors.yellow);
@@ -73,6 +339,7 @@ async function main() {
   // 创建会话
   const sessionId = uuidv4();
   print(`会话 ID: ${sessionId}`, colors.dim);
+  print(`流式日志: ${streamLoggingEnabled ? '已开启' : '已关闭'} (使用 /stream 切换)`, colors.dim);
   console.log('');
 
   // 创建 readline 接口
@@ -94,7 +361,7 @@ async function main() {
 
     // 处理命令
     if (input.startsWith('/')) {
-      await handleCommand(input, orchestrator, sessionId, rl);
+      await handleCommand(input, orchestrator, sessionId, rl, () => currentRequestId);
       rl.prompt();
       return;
     }
@@ -102,58 +369,95 @@ async function main() {
     // 处理用户消息
     try {
       print('', colors.reset);
-      print('思考中...', colors.dim);
+      
+      if (streamLoggingEnabled) {
+        print('═'.repeat(70), colors.cyan);
+        print('  📡 Agent 协作链路', colors.cyan);
+        print('═'.repeat(70), colors.cyan);
+      } else {
+        print('思考中...', colors.dim);
+      }
+
+      // 生成一个临时 requestId 用于匹配日志事件
+      // 实际的 requestId 会在 chat 方法内部生成，我们通过事件来捕获
+      let capturedRequestId = null;
+      const captureListener = (event) => {
+        if (event.type === LogEventType.REQUEST_START && !capturedRequestId) {
+          capturedRequestId = event.requestId;
+          currentRequestId = capturedRequestId;
+        }
+      };
+      streamLogger.on(LogEventType.REQUEST_START, captureListener);
 
       const response = await orchestrator.chat({
         message: input,
         sessionId,
       });
 
-      // 清除 "思考中..."
-      process.stdout.write('\x1b[1A\x1b[2K');
+      // 移除监听器
+      streamLogger.off(LogEventType.REQUEST_START, captureListener);
+      currentRequestId = null;
 
-      // 显示回答
-      print('');
-      print('🤖 助手:', colors.blue);
-      print(response.answer, colors.reset);
-
-      // 显示执行详情
-      if (response.plan && response.plan.length > 0) {
-        print('');
-        print('📋 执行计划:', colors.cyan);
-        for (let i = 0; i < response.plan.length; i++) {
-          const step = response.plan[i];
-          print(`   ${i + 1}. ${step.tool} ${step.description || ''}`, colors.dim);
-        }
+      // 如果没有流式日志，清除 "思考中..."
+      if (!streamLoggingEnabled) {
+        process.stdout.write('\x1b[1A\x1b[2K');
       }
 
-      if (response.toolCalls && response.toolCalls.length > 0) {
-        print('');
-        print('🔧 工具调用结果:', colors.cyan);
-        for (const call of response.toolCalls) {
-          const status = call.success ? '✅' : '❌';
-          print(`   ${status} ${call.tool} (${call.durationMs}ms)`, call.success ? colors.green : colors.red);
-          if (!call.success && call.error) {
-            print(`      错误: ${call.error}`, colors.red);
+      // 显示分隔线
+      if (streamLoggingEnabled) {
+        print('═'.repeat(70), colors.cyan);
+      }
+
+      // 显示最终回答
+      // print('');
+      // print('Agent 概括:', colors.blue);
+      // const answerLines = response.answer.split('\n');
+      // for (const line of answerLines) {
+      //   print(`  ${line}`, colors.reset);
+      // }
+
+      // 如果不是流式模式，显示详细信息
+      if (!streamLoggingEnabled) {
+        // 显示执行详情
+        if (response.plan && response.plan.length > 0) {
+          print('');
+          print('📋 执行计划:', colors.cyan);
+          for (let i = 0; i < response.plan.length; i++) {
+            const step = response.plan[i];
+            print(`   ${i + 1}. ${step.tool} ${step.description || ''}`, colors.dim);
           }
         }
-      }
 
-      if (response.ragHits && response.ragHits.length > 0) {
-        print('');
-        print('📍 相关点位:', colors.cyan);
-        for (const hit of response.ragHits.slice(0, 3)) {
-          const name = hit.chunkText ? hit.chunkText.substring(0, 200) + '...' : '未命名';
-          const score = (hit.score * 100).toFixed(0);
-          print(`   - ${name} (${score}%)`, colors.dim);
+        if (response.toolCalls && response.toolCalls.length > 0) {
+          print('');
+          print('🔧 工具调用结果:', colors.cyan);
+          for (const call of response.toolCalls) {
+            const status = call.success ? '✅' : '❌';
+            print(`   ${status} ${call.tool} (${call.durationMs}ms)`, call.success ? colors.green : colors.red);
+            if (!call.success && call.error) {
+              print(`      错误: ${call.error}`, colors.red);
+            }
+          }
         }
-      }
 
-      print('');
-      print(`⏱️  耗时: ${response.durationMs}ms`, colors.dim);
+        if (response.ragHits && response.ragHits.length > 0) {
+          print('');
+          print('📍 RAG 检索结果:', colors.cyan);
+          for (const hit of response.ragHits.slice(0, 3)) {
+            const name = hit.chunkText ? hit.chunkText.substring(0, 50) + '...' : '未命名';
+            const score = (hit.score * 100).toFixed(0);
+            print(`   - ${name} (${score}%)`, colors.dim);
+          }
+        }
+
+        print('');
+        print(`⏱️  总耗时: ${response.durationMs}ms`, colors.dim);
+      }
+      
       print('');
 
     } catch (error) {
+      currentRequestId = null;
       print('');
       print(`❌ 错误: ${error.message}`, colors.red);
       print('');
@@ -169,7 +473,7 @@ async function main() {
   });
 }
 
-async function handleCommand(input, orchestrator, sessionId, rl) {
+async function handleCommand(input, orchestrator, sessionId, rl, getCurrentRequestId) {
   const [cmd, ...args] = input.slice(1).split(' ');
 
   switch (cmd.toLowerCase()) {
@@ -178,6 +482,7 @@ async function handleCommand(input, orchestrator, sessionId, rl) {
       print('可用命令:', colors.cyan);
       print('  /help              - 显示帮助', colors.reset);
       print('  /status            - 检查系统状态', colors.reset);
+      print('  /stream            - 切换流式日志显示', colors.reset);
       print('  /clear             - 清除会话历史', colors.reset);
       print('  /history           - 显示会话历史', colors.reset);
       print('  /quit, /exit, /q   - 退出', colors.reset);
@@ -186,6 +491,23 @@ async function handleCommand(input, orchestrator, sessionId, rl) {
       print('  "让无人机起飞到1.5米"', colors.reset);
       print('  "飞到起点位置"', colors.reset);
       print('  "执行巡逻任务"', colors.reset);
+      print('');
+      print('架构说明:', colors.cyan);
+      print('  本系统采用多 Agent 架构：', colors.reset);
+      print('  1. Orchestrator Agent - 核心编排，接收请求并调度其他Agent', colors.dim);
+      print('  2. RAG Agent - 向量检索，从 Supabase 检索地图点位信息', colors.dim);
+      print('  3. Planner Agent - 任务规划，使用 Gemini LLM 生成执行计划', colors.dim);
+      print('  4. Executor Agent - 执行器，通过 MCP 协议控制无人机', colors.dim);
+      print('');
+      break;
+
+    case 'stream':
+      streamLoggingEnabled = !streamLoggingEnabled;
+      print('');
+      print(`流式日志已${streamLoggingEnabled ? '开启' : '关闭'}`, streamLoggingEnabled ? colors.green : colors.yellow);
+      if (streamLoggingEnabled) {
+        print('现在可以实时看到 Agent 调用链路', colors.dim);
+      }
       print('');
       break;
 
