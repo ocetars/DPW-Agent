@@ -143,7 +143,7 @@ async function main() {
         print('');
         print('📍 相关点位:', colors.cyan);
         for (const hit of response.ragHits.slice(0, 3)) {
-          const name = hit.metadata?.name || '未命名';
+          const name = hit.chunkText ? hit.chunkText.substring(0, 200) + '...' : '未命名';
           const score = (hit.score * 100).toFixed(0);
           print(`   - ${name} (${score}%)`, colors.dim);
         }

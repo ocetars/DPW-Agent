@@ -184,20 +184,16 @@ export class PlannerAgent {
     // RAG 知识
     if (ragHits && ragHits.length > 0) {
       parts.push('**地图点位信息**:');
-      for (const hit of ragHits) {
-        const { metadata, chunkText, score } = hit;
-        parts.push(`- **${metadata?.name || '未命名'}** (相似度: ${(score * 100).toFixed(0)}%)`);
-        if (metadata?.worldX != null && metadata?.worldZ != null) {
-          const y = metadata.worldY != null ? `, y=${metadata.worldY}` : '';
-          parts.push(`  坐标: x=${metadata.worldX}, z=${metadata.worldZ}${y}`);
-        }
-        if (metadata?.tags?.length > 0) {
-          parts.push(`  标签: ${metadata.tags.join(', ')}`);
-        }
+      for (let i = 0; i < ragHits.length; i++) {
+        const hit = ragHits[i];
+        const { chunkText, score } = hit;
         if (chunkText) {
-          parts.push(`  描述: ${chunkText.substring(0, 150)}...`);
+          parts.push(`- **检索结果 ${i + 1}** (相似度: ${(score * 100).toFixed(0)}%)`);
+          parts.push(`  ${chunkText}`);
         }
       }
+      parts.push('');
+      parts.push('**注意**: 请从上述检索结果中提取坐标信息。坐标格式通常为 (x, z) 或包含 x=, z= 的描述。');
       parts.push('');
     } else {
       parts.push('**地图点位信息**: 未找到相关点位');
