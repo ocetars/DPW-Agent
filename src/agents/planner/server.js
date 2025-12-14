@@ -41,6 +41,33 @@ async function main() {
         
         return result;
       },
+
+      // 注册 reflect 技能（ReAct 模式的反思阶段）
+      reflect: async (input, context) => {
+        const { 
+          originalRequest, 
+          previousPlan, 
+          executionResult, 
+          currentDroneState,
+          ragHits = [],
+          availableTools = [],
+        } = input;
+        
+        if (!originalRequest) {
+          throw new Error('originalRequest is required');
+        }
+
+        const result = await plannerAgent.reflect(
+          originalRequest,
+          previousPlan,
+          executionResult,
+          currentDroneState,
+          ragHits,
+          availableTools
+        );
+        
+        return result;
+      },
     },
   });
 

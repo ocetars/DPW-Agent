@@ -57,13 +57,15 @@ function printHeader() {
   console.log('');
   print('╔════════════════════════════════════════════════════════════╗', colors.cyan);
   print('║          DPW-Agent - 无人机智能控制助手                     ║', colors.cyan);
-  print('║          A2A + RAG + MCP 多Agent系统                        ║', colors.cyan);
+  print('║          A2A + RAG + MCP 多Agent系统 (ReAct模式)            ║', colors.cyan);
   print('╚════════════════════════════════════════════════════════════╝', colors.cyan);
   console.log('');
   print('架构说明:', colors.dim);
   print('  Orchestrator ──┬──► RAG Agent (向量检索)', colors.dim);
-  print('                 ├──► Planner Agent (LLM规划)', colors.dim);
+  print('                 ├──► Planner Agent (LLM规划 + 反思)', colors.dim);
   print('                 └──► Executor Agent (MCP执行)', colors.dim);
+  console.log('');
+  print('ReAct 循环: Plan → Execute → Observe → Reflect → (Re-plan)', colors.yellow);
   console.log('');
   print('命令：', colors.dim);
   print('  /help    - 显示帮助', colors.dim);
@@ -257,12 +259,50 @@ function handleStreamEvent(event) {
       );
       break;
 
+    // ===== ReAct 反思开始 =====
+    case LogEventType.REFLECT_START:
+      console.log('');
+      printAgentAction(AgentName.PLANNER, `${colors.magenta}🔄 开始 ReAct 反思${colors.reset}`, `第 ${event.iteration} 轮验证`);
+      break;
+
+    // ===== ReAct 反思结果 =====
+    case LogEventType.REFLECT_RESULT:
+      const goalIcon = event.goalAchieved ? '✅' : '🔄';
+      const goalStatus = event.goalAchieved ? '目标已达成' : '目标未达成';
+      const confidenceStr = `置信度 ${(event.confidence * 100).toFixed(0)}%`;
+      
+      printAgentAction(AgentName.PLANNER, `${goalIcon} ${colors.bright}${goalStatus}${colors.reset}`, confidenceStr);
+      
+      // 显示观察和推理
+      if (event.observation) {
+        console.log(`${colors.dim}    └─ 观察: ${event.observation}${colors.reset}`);
+      }
+      if (event.reasoning) {
+        console.log(`${colors.dim}    └─ 推理: ${event.reasoning}${colors.reset}`);
+      }
+      
+      // 如果目标未达成且有补救步骤
+      if (!event.goalAchieved && event.nextStepsCount > 0) {
+        const items = event.nextSteps.map((s, i) => 
+          `${colors.yellow}补救 ${i + 1}:${colors.reset} ${colors.green}${s.tool}${colors.reset} ${s.description || ''}`
+        );
+        printDetailBlock(`生成 ${event.nextStepsCount} 个补救步骤`, items);
+      }
+      
+      // 显示总结
+      if (event.summary) {
+        console.log(`${colors.cyan}    └─ 总结: ${event.summary}${colors.reset}`);
+      }
+      
+      console.log(`${colors.dim}    └─ 反思耗时: ${event.durationMs}ms${colors.reset}`);
+      break;
+
     // ===== 请求结束 =====
     case LogEventType.REQUEST_END:
       console.log('');
       printAgentAction(
         AgentName.ORCHESTRATOR, 
-        `${colors.bright}${event.success ? '✅ 请求处理完成' : '❌ 请求处理失败'}${colors.reset}`,
+        `${colors.bright}${event.success ? '✅ 系统协作结束' : '❌ 系统协作失败'}${colors.reset}`,
         `总耗时 ${event.durationMs}ms`
       );
       break;
@@ -302,6 +342,8 @@ async function main() {
       LogEventType.AGENT_CALL_ERROR,
       LogEventType.RAG_RESULT,
       LogEventType.PLANNER_RESULT,
+      LogEventType.REFLECT_START,
+      LogEventType.REFLECT_RESULT,
       LogEventType.EXECUTOR_START,
       LogEventType.EXECUTOR_STEP_START,
       LogEventType.EXECUTOR_STEP_END,
@@ -372,7 +414,7 @@ async function main() {
       
       if (streamLoggingEnabled) {
         print('═'.repeat(70), colors.cyan);
-        print('  📡 Agent 协作链路', colors.cyan);
+        print('  🌍 Multi-Agent 协作链路', colors.cyan);
         print('═'.repeat(70), colors.cyan);
       } else {
         print('思考中...', colors.dim);
@@ -493,11 +535,17 @@ async function handleCommand(input, orchestrator, sessionId, rl, getCurrentReque
       print('  "执行巡逻任务"', colors.reset);
       print('');
       print('架构说明:', colors.cyan);
-      print('  本系统采用多 Agent 架构：', colors.reset);
+      print('  本系统采用多 Agent 架构 + ReAct 模式：', colors.reset);
       print('  1. Orchestrator Agent - 核心编排，接收请求并调度其他Agent', colors.dim);
       print('  2. RAG Agent - 向量检索，从 Supabase 检索地图点位信息', colors.dim);
-      print('  3. Planner Agent - 任务规划，使用 Gemini LLM 生成执行计划', colors.dim);
+      print('  3. Planner Agent - 任务规划 + 反思验证，使用 Gemini LLM', colors.dim);
       print('  4. Executor Agent - 执行器，通过 MCP 协议控制无人机', colors.dim);
+      print('');
+      print('ReAct 循环 (最多3轮):', colors.cyan);
+      print('  Plan   → 根据用户意图生成执行计划', colors.dim);
+      print('  Act    → 执行计划中的工具调用', colors.dim);
+      print('  Observe→ 获取执行后的无人机状态', colors.dim);
+      print('  Reflect→ LLM 反思是否达成目标，未达成则继续循环', colors.dim);
       print('');
       break;
 

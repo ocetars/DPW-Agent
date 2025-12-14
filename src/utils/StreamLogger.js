@@ -59,6 +59,10 @@ export const LogEventType = {
   PLANNER_LLM_RESPONSE: 'planner:llm:response',
   PLANNER_RESULT: 'planner:result',
 
+  // ReAct 反思相关
+  REFLECT_START: 'reflect:start',
+  REFLECT_RESULT: 'reflect:result',
+
   // Executor 相关
   EXECUTOR_START: 'executor:start',
   EXECUTOR_STEP_START: 'executor:step:start',
@@ -316,6 +320,36 @@ class StreamLogger extends EventEmitter {
       })),
       reasoning: plan.reasoning?.substring(0, 200),
       needsClarification: plan.needsClarification,
+      durationMs,
+    });
+  }
+
+  // ==================== ReAct 反思相关 ====================
+
+  reflectStart(requestId, iteration) {
+    this.log(LogEventType.REFLECT_START, {
+      requestId,
+      agent: AgentName.PLANNER,
+      phase: `ReAct 反思 (第 ${iteration} 轮)`,
+      iteration,
+    });
+  }
+
+  reflectResult(requestId, reflection, durationMs) {
+    this.log(LogEventType.REFLECT_RESULT, {
+      requestId,
+      agent: AgentName.PLANNER,
+      phase: '反思完成',
+      goalAchieved: reflection.goalAchieved,
+      confidence: reflection.confidence,
+      observation: reflection.observation?.substring(0, 100),
+      reasoning: reflection.reasoning?.substring(0, 150),
+      nextStepsCount: reflection.nextSteps?.length || 0,
+      nextSteps: reflection.nextSteps?.map(s => ({
+        tool: s.tool,
+        description: s.description,
+      })),
+      summary: reflection.summary,
       durationMs,
     });
   }

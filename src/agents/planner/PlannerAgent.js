@@ -213,6 +213,201 @@ export class PlannerAgent {
   }
 
   // 不再暴露硬编码工具列表；工具由 MCP Server 动态发现并注入
+
+  /**
+   * 反思：检查执行结果是否达成目标（ReAct 模式的 Observe + Reflect）
+   * @param {string} originalRequest - 原始用户请求
+   * @param {Object} previousPlan - 之前的执行计划
+   * @param {Object} executionResult - 执行结果
+   * @param {Object} currentDroneState - 执行后的无人机状态
+   * @param {Array} ragHits - RAG 检索结果（目标点位信息）
+   * @param {Array} availableTools - 可用工具列表
+   * @returns {Promise<Object>} - 反思结果
+   */
+  async reflect(originalRequest, previousPlan, executionResult, currentDroneState, ragHits = [], availableTools = []) {
+    const startTime = Date.now();
+    this.logger.info(`Reflecting on execution result...`);
+
+    try {
+      const prompt = this._buildReflectPrompt(
+        originalRequest,
+        previousPlan,
+        executionResult,
+        currentDroneState,
+        ragHits,
+        availableTools
+      );
+
+      const result = await this.gemini.generateJSON(prompt, {
+        temperature: 0.2, // 反思用更低温度保证一致性
+      });
+
+      // 验证反思结果
+      const reflection = this._validateReflection(result, availableTools);
+
+      const durationMs = Date.now() - startTime;
+      // this.logger.info(`Reflection completed in ${durationMs}ms, goalAchieved: ${reflection.goalAchieved}`);
+
+      return {
+        ...reflection,
+        durationMs,
+      };
+    } catch (error) {
+      this.logger.error('Reflection failed:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * 构建反思提示词
+   * @private
+   */
+  _buildReflectPrompt(originalRequest, previousPlan, executionResult, currentDroneState, ragHits, availableTools) {
+    const parts = [];
+
+    parts.push(`你是一个无人机任务验证助手。你需要检查任务执行结果，判断是否已达成用户的目标。
+
+## 关键任务
+
+1. **分析用户原始请求**：理解用户想要达成的最终目标
+2. **对比执行结果**：检查无人机当前状态是否符合目标
+3. **做出判断**：目标是否已达成？如果没有，需要什么补救措施？
+
+## 输出格式（严格 JSON）
+
+{
+  "observation": "对当前状态的客观描述",
+  "reasoning": "分析目标是否达成的推理过程",
+  "goalAchieved": true/false,
+  "confidence": 0.0-1.0,
+  "nextSteps": [
+    {
+      "tool": "tool.name",
+      "args": { },
+      "description": "补救步骤描述"
+    }
+  ],
+  "summary": "给用户的简短总结"
+}
+
+## 判断标准
+
+- **位置判断**：如果目标是到达某点，检查当前位置与目标位置的距离是否在合理误差范围内（通常 0.2 米以内可视为到达）
+- **动作判断**：如果目标是执行某动作（如降落），检查执行结果是否成功
+- **goalAchieved = true 时**：nextSteps 应为空数组
+- **goalAchieved = false 时**：nextSteps 应包含补救步骤`);
+
+    parts.push('');
+    parts.push('---');
+    parts.push('');
+    parts.push('## 当前验证任务');
+    parts.push('');
+
+    // 可用工具
+    parts.push('**可用工具列表**:');
+    parts.push(this._formatToolsForPrompt(availableTools));
+    parts.push('');
+
+    // 原始请求
+    parts.push(`**用户原始请求**: ${originalRequest}`);
+    parts.push('');
+
+    // RAG 目标点位信息
+    if (ragHits && ragHits.length > 0) {
+      parts.push('**目标点位信息（从 RAG 检索）**:');
+      for (let i = 0; i < Math.min(ragHits.length, 3); i++) {
+        const hit = ragHits[i];
+        if (hit.chunkText) {
+          parts.push(`- ${hit.chunkText}`);
+        }
+      }
+      parts.push('');
+    }
+
+    // 之前的计划
+    parts.push('**已执行的计划**:');
+    if (previousPlan?.steps && previousPlan.steps.length > 0) {
+      for (let i = 0; i < previousPlan.steps.length; i++) {
+        const step = previousPlan.steps[i];
+        parts.push(`  ${i + 1}. ${step.tool}(${JSON.stringify(step.args)}) - ${step.description || ''}`);
+      }
+    } else {
+      parts.push('  (无步骤)');
+    }
+    parts.push('');
+
+    // 执行结果
+    parts.push('**执行结果**:');
+    if (executionResult?.output) {
+      const { allSuccess, completedSteps, totalSteps, results } = executionResult.output;
+      parts.push(`- 执行状态: ${allSuccess ? '全部成功' : '部分失败'}`);
+      parts.push(`- 完成步骤: ${completedSteps}/${totalSteps}`);
+      if (results && results.length > 0) {
+        parts.push('- 详细结果:');
+        for (const r of results) {
+          parts.push(`  - Step ${r.step}: ${r.success ? '✓' : '✗'} ${r.tool} ${r.error ? `(错误: ${r.error})` : ''}`);
+        }
+      }
+    } else {
+      parts.push('- (无执行结果)');
+    }
+    parts.push('');
+
+    // 当前无人机状态
+    parts.push('**执行后无人机状态**:');
+    if (currentDroneState) {
+      parts.push(`- 位置: x=${currentDroneState.position?.x?.toFixed(2) || 0}, y=${currentDroneState.position?.y?.toFixed(2) || 0}, z=${currentDroneState.position?.z?.toFixed(2) || 0}`);
+      parts.push(`- 状态: ${currentDroneState.isActive ? '执行中' : '空闲'}`);
+    } else {
+      parts.push('- (无法获取状态)');
+    }
+    parts.push('');
+
+    parts.push('请分析以上信息，判断任务目标是否已达成，输出 JSON:');
+
+    return parts.join('\n');
+  }
+
+  /**
+   * 验证反思结果
+   * @private
+   */
+  _validateReflection(result, availableTools) {
+    const allowedToolNames = new Set(
+      (Array.isArray(availableTools) ? availableTools : [])
+        .map(t => t?.name)
+        .filter(Boolean)
+        .map(String)
+    );
+
+    const reflection = {
+      observation: result.observation || '',
+      reasoning: result.reasoning || '',
+      goalAchieved: Boolean(result.goalAchieved),
+      confidence: typeof result.confidence === 'number' ? Math.min(1, Math.max(0, result.confidence)) : 0.2,
+      nextSteps: [],
+      summary: result.summary || '',
+    };
+
+    // 验证补救步骤
+    if (!reflection.goalAchieved && Array.isArray(result.nextSteps)) {
+      for (const step of result.nextSteps) {
+        const toolName = step?.tool ? String(step.tool) : '';
+        if (!toolName || !allowedToolNames.has(toolName)) {
+          this.logger.warn(`Invalid tool in nextSteps: ${toolName || '(empty)'}, skipping`);
+          continue;
+        }
+
+        reflection.nextSteps.push({
+          tool: toolName,
+          args: (step.args && typeof step.args === 'object') ? step.args : {},
+          description: step.description ? String(step.description) : '',
+        });
+      }
+    }
+
+    return reflection;
+  }
 }
 
 // 单例

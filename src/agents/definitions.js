@@ -123,6 +123,45 @@ export const PlannerAgentCard = createAgentCard({
         },
       },
     },
+    {
+      id: 'reflect',
+      name: '执行反思',
+      description: 'ReAct 模式的反思阶段：检查执行结果是否达成目标，如未达成则生成补救步骤',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          originalRequest: { type: 'string', description: '用户原始请求' },
+          previousPlan: { type: 'object', description: '之前执行的计划' },
+          executionResult: { type: 'object', description: '执行结果' },
+          currentDroneState: { type: 'object', description: '执行后的无人机状态' },
+          ragHits: { type: 'array', description: 'RAG 检索结果（目标点位信息）' },
+          availableTools: { type: 'array', description: '可用工具列表' },
+        },
+        required: ['originalRequest', 'executionResult'],
+      },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          observation: { type: 'string', description: '对当前状态的客观描述' },
+          reasoning: { type: 'string', description: '分析目标是否达成的推理过程' },
+          goalAchieved: { type: 'boolean', description: '目标是否已达成' },
+          confidence: { type: 'number', description: '判断置信度 0.0-1.0' },
+          nextSteps: {
+            type: 'array',
+            description: '补救步骤（仅当 goalAchieved=false 时）',
+            items: {
+              type: 'object',
+              properties: {
+                tool: { type: 'string' },
+                args: { type: 'object' },
+                description: { type: 'string' },
+              },
+            },
+          },
+          summary: { type: 'string', description: '给用户的简短总结' },
+        },
+      },
+    },
   ],
 });
 
