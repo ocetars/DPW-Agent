@@ -6,44 +6,6 @@
 import { getMcpClient } from './McpClientWrapper.js';
 import { createLogger } from '../../utils/logger.js';
 
-// 工具名称映射（支持多种命名风格）
-const TOOL_NAME_MAP = {
-  'drone.get_state': 'drone.get_state',
-  'drone.getState': 'drone.get_state',
-  'getState': 'drone.get_state',
-  
-  'drone.take_off': 'drone.take_off',
-  'drone.takeOff': 'drone.take_off',
-  'takeOff': 'drone.take_off',
-  
-  'drone.land': 'drone.land',
-  'land': 'drone.land',
-  
-  'drone.hover': 'drone.hover',
-  'hover': 'drone.hover',
-  
-  'drone.move_to': 'drone.move_to',
-  'drone.moveTo': 'drone.move_to',
-  'moveTo': 'drone.move_to',
-
-  'drone.move_relative': 'drone.move_relative',
-  'drone.moveRelative': 'drone.move_relative',
-  'moveRelative': 'drone.move_relative',
-  
-  'drone.run_mission': 'drone.run_mission',
-  'drone.runMission': 'drone.run_mission',
-  'runMission': 'drone.run_mission',
-  
-  'drone.cancel': 'drone.cancel',
-  'cancel': 'drone.cancel',
-  
-  'drone.pause': 'drone.pause',
-  'pause': 'drone.pause',
-  
-  'drone.resume': 'drone.resume',
-  'resume': 'drone.resume',
-};
-
 export class ExecutorAgent {
   /**
    * @param {Object} [config]
@@ -67,6 +29,38 @@ export class ExecutorAgent {
     await this.mcpClient.connect();
     this.initialized = true;
     this.logger.info('Executor Agent initialized');
+  }
+
+  /**
+   * 从 MCP Server 获取可用工具列表（协议发现）
+   * @returns {Promise<Array>}
+   */
+  async listTools() {
+    await this.initialize();
+    await this.mcpClient.refreshTools();
+    return this.mcpClient.getAvailableTools();
+  }
+
+  /**
+   * 获取无人机当前状态（特例：动态调用 MCP 工具 drone.get_state）
+   * 说明：虽然我们移除了硬编码工具列表，但无人机状态是规划阶段的重要上下文，
+   *       因此作为特例保留这个便捷方法。工具名仍然通过 MCP 协议校验。
+   * @returns {Promise<Object>}
+   */
+  async getDroneState() {
+    await this.initialize();
+    
+    const toolName = 'drone.get_state';
+    
+    // 协议校验：确保工具确实存在
+    if (!this.mcpClient.hasTool(toolName)) {
+      await this.mcpClient.refreshTools();
+      if (!this.mcpClient.hasTool(toolName)) {
+        throw new Error(`MCP Server does not expose tool: ${toolName}`);
+      }
+    }
+    
+    return this.mcpClient.callTool(toolName, {});
   }
 
   /**
@@ -181,32 +175,23 @@ export class ExecutorAgent {
   async _executeStep(step) {
     const { tool, args = {} } = step;
 
-    // 规范化工具名称
-    const normalizedTool = TOOL_NAME_MAP[tool] || tool;
+    if (!tool || typeof tool !== 'string') {
+      throw new Error('Invalid step.tool (must be a non-empty string)');
+    }
 
-    this.logger.debug(`Executing: ${normalizedTool}`, args);
+    // 协议驱动：只允许调用 MCP Server 实际暴露的工具
+    if (!this.mcpClient.hasTool(tool)) {
+      // 尝试刷新一次（防止 server 工具集发生变化）
+      await this.mcpClient.refreshTools();
+      if (!this.mcpClient.hasTool(tool)) {
+        throw new Error(`Unknown MCP tool: ${tool}`);
+      }
+    }
+
+    this.logger.debug(`Executing: ${tool}`, args);
 
     // 调用 MCP 工具
-    return this.mcpClient.callTool(normalizedTool, args);
-  }
-
-  /**
-   * 获取无人机状态
-   * @returns {Promise<Object>}
-   */
-  async getState() {
-    await this.initialize();
-    return this.mcpClient.getState();
-  }
-
-  /**
-   * 紧急停止（悬停）
-   * @returns {Promise<Object>}
-   */
-  async emergencyStop() {
-    await this.initialize();
-    this.logger.warn('Emergency stop triggered!');
-    return this.mcpClient.hover();
+    return this.mcpClient.callTool(tool, args);
   }
 
   /**

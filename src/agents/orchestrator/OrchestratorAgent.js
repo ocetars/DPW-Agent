@@ -118,20 +118,42 @@ export class OrchestratorAgent {
         }
       }
 
-      // ===== 阶段 1.5: 获取无人机状态 =====
+      // ===== 阶段 1.5: 获取无人机状态（特例：作为规划的重要上下文）=====
       let droneState = null;
       try {
-        this.streamLogger.agentCallStart(requestId, AgentName.EXECUTOR, 'getState', {});
+        this.streamLogger.agentCallStart(requestId, AgentName.EXECUTOR, 'getDroneState', {});
         const stateStartTime = Date.now();
         
-        const stateResult = await this._callExecutorGetState(sessionId);
+        const stateResult = await this._callExecutorGetDroneState(sessionId);
         if (stateResult?.success) {
           droneState = stateResult.output;
-          this.streamLogger.agentCallEnd(requestId, AgentName.EXECUTOR, 'getState', { position: droneState?.position }, Date.now() - stateStartTime);
+          this.streamLogger.agentCallEnd(requestId, AgentName.EXECUTOR, 'getDroneState', { position: droneState?.position }, Date.now() - stateStartTime);
         }
       } catch (error) {
-        this.streamLogger.agentCallError(requestId, AgentName.EXECUTOR, 'getState', error);
+        this.streamLogger.agentCallError(requestId, AgentName.EXECUTOR, 'getDroneState', error);
         this.logger.warn(`[${sessionId}] Failed to get drone state, continuing without it:`, error.message);
+      }
+
+      // ===== 阶段 1.6: 发现可用工具（从 MCP Server 动态获取）=====
+      let availableTools = [];
+      try {
+        this.streamLogger.agentCallStart(requestId, AgentName.EXECUTOR, 'listTools', {});
+        const toolsStartTime = Date.now();
+
+        const toolsResult = await this._callExecutorListTools(sessionId);
+        if (toolsResult?.success) {
+          availableTools = toolsResult.output?.tools || [];
+          this.streamLogger.agentCallEnd(
+            requestId,
+            AgentName.EXECUTOR,
+            'listTools',
+            { toolCount: Array.isArray(availableTools) ? availableTools.length : 0 },
+            Date.now() - toolsStartTime
+          );
+        }
+      } catch (error) {
+        this.streamLogger.agentCallError(requestId, AgentName.EXECUTOR, 'listTools', error);
+        this.logger.warn(`[${sessionId}] Failed to list MCP tools, planning may fail:`, error.message);
       }
 
       // ===== 阶段 2: 规划 =====
@@ -139,7 +161,7 @@ export class OrchestratorAgent {
       this.streamLogger.plannerStart(requestId, message);
       const planStartTime = Date.now();
       
-      const planResult = await this._callPlanner(message, ragHits, droneState, session, sessionId);
+      const planResult = await this._callPlanner(message, ragHits, droneState, availableTools, session, sessionId);
       
       if (!planResult.success) {
         this.streamLogger.agentCallError(requestId, AgentName.PLANNER, 'plan', new Error(planResult.error));
@@ -244,22 +266,31 @@ export class OrchestratorAgent {
    * 调用 Planner Agent
    * @private
    */
-  async _callPlanner(userRequest, ragHits, droneState, session, sessionId) {
+  async _callPlanner(userRequest, ragHits, droneState, availableTools, session, sessionId) {
     // TODO: 可以把历史对话也传给 Planner 作为上下文
     return this.a2aClient.submitTask('planner', 'plan', {
       userRequest,
       ragHits,
       droneState,
+      availableTools,
       // conversationHistory: session.history.slice(-4), // 最近的对话
     }, { sessionId, timeout: 60000 });
   }
 
   /**
-   * 调用 Executor Agent 获取状态
+   * 调用 Executor Agent 获取无人机状态（特例）
    * @private
    */
-  async _callExecutorGetState(sessionId) {
-    return this.a2aClient.submitTask('executor', 'getState', {}, { sessionId, timeout: 15000 });
+  async _callExecutorGetDroneState(sessionId) {
+    return this.a2aClient.submitTask('executor', 'getDroneState', {}, { sessionId, timeout: 15000 });
+  }
+
+  /**
+   * 调用 Executor Agent 获取 MCP 工具列表
+   * @private
+   */
+  async _callExecutorListTools(sessionId) {
+    return this.a2aClient.submitTask('executor', 'listTools', {}, { sessionId, timeout: 15000 });
   }
 
   /**
@@ -401,4 +432,3 @@ export function getOrchestratorAgent(config) {
 export function resetOrchestratorAgent() {
   instance = null;
 }
-

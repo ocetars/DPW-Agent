@@ -48,9 +48,15 @@ async function main() {
         return result;
       },
 
-      // 注册 getState 技能
-      getState: async (input, context) => {
-        const state = await executorAgent.getState();
+      // 注册 listTools 技能（从 MCP Server 动态发现）
+      listTools: async (input, context) => {
+        const tools = await executorAgent.listTools();
+        return { tools };
+      },
+
+      // 注册 getDroneState 技能（特例：获取无人机状态供规划使用）
+      getDroneState: async (input, context) => {
+        const state = await executorAgent.getDroneState();
         return state;
       },
     },

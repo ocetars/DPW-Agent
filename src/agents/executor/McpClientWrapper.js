@@ -90,6 +90,27 @@ export class McpClientWrapper {
   }
 
   /**
+   * 刷新工具列表（通过 MCP listTools）
+   * @returns {Promise<void>}
+   */
+  async refreshTools() {
+    if (!this.connected) {
+      await this.connect();
+      return;
+    }
+    await this._loadTools();
+  }
+
+  /**
+   * 检查工具是否存在
+   * @param {string} toolName
+   * @returns {boolean}
+   */
+  hasTool(toolName) {
+    return this.tools.has(toolName);
+  }
+
+  /**
    * 调用工具
    * @param {string} toolName - 工具名称
    * @param {Object} [args] - 工具参数
@@ -167,81 +188,6 @@ export class McpClientWrapper {
    */
   isConnected() {
     return this.connected;
-  }
-
-  // ==================== 便捷方法 ====================
-
-  /**
-   * 获取无人机状态
-   */
-  async getState() {
-    return this.callTool('drone.get_state');
-  }
-
-  /**
-   * 起飞
-   * @param {number} [altitude=1.0]
-   */
-  async takeOff(altitude = 1.0) {
-    return this.callTool('drone.take_off', { altitude });
-  }
-
-  /**
-   * 降落
-   */
-  async land() {
-    return this.callTool('drone.land');
-  }
-
-  /**
-   * 悬停
-   */
-  async hover() {
-    return this.callTool('drone.hover');
-  }
-
-  /**
-   * 移动到指定位置
-   * @param {number} x
-   * @param {number} z
-   * @param {number} [y]
-   * @param {Object} [options]
-   */
-  async moveTo(x, z, y = null, options = {}) {
-    const args = { x, z, ...options };
-    if (y != null) {
-      args.y = y;
-    }
-    return this.callTool('drone.move_to', args);
-  }
-
-  /**
-   * 执行航线任务
-   * @param {Array} waypoints
-   */
-  async runMission(waypoints) {
-    return this.callTool('drone.run_mission', { waypoints });
-  }
-
-  /**
-   * 取消任务
-   */
-  async cancel() {
-    return this.callTool('drone.cancel');
-  }
-
-  /**
-   * 暂停任务
-   */
-  async pause() {
-    return this.callTool('drone.pause');
-  }
-
-  /**
-   * 继续任务
-   */
-  async resume() {
-    return this.callTool('drone.resume');
   }
 }
 

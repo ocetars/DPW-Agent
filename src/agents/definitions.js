@@ -73,6 +73,19 @@ export const PlannerAgentCard = createAgentCard({
         type: 'object',
         properties: {
           userRequest: { type: 'string', description: '用户请求' },
+          availableTools: {
+            type: 'array',
+            description: '从 MCP Server 动态发现的可用工具列表（listTools）',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                description: { type: 'string' },
+                inputSchema: { type: 'object' },
+              },
+              required: ['name'],
+            },
+          },
           ragHits: { 
             type: 'array', 
             description: 'RAG 检索结果，包含点位信息',
@@ -197,11 +210,8 @@ export const ExecutorAgentCard = createAgentCard({
               type: 'object',
               properties: {
                 tool: { 
-                  type: 'string', 
-                  enum: ['drone.take_off', 'drone.land', 'drone.move_to', 'drone.hover', 
-                         'drone.move_relative', 'drone.run_mission', 'drone.get_state', 'drone.cancel', 
-                         'drone.pause', 'drone.resume'],
-                  description: '工具名称',
+                  type: 'string',
+                  description: '工具名称（必须来自 MCP Server / listTools 暴露的工具名）',
                 },
                 args: { type: 'object', description: '工具参数' },
               },
@@ -235,14 +245,44 @@ export const ExecutorAgentCard = createAgentCard({
       },
     },
     {
-      id: 'getState',
-      name: '获取无人机状态',
-      description: '获取当前无人机状态',
+      id: 'listTools',
+      name: '发现可用工具',
+      description: '从 MCP Server 动态获取可用工具列表（协议发现）',
       inputSchema: { type: 'object', properties: {} },
       outputSchema: {
         type: 'object',
         properties: {
-          position: { type: 'object' },
+          tools: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                description: { type: 'string' },
+                inputSchema: { type: 'object' },
+              },
+              required: ['name'],
+            },
+          },
+        },
+      },
+    },
+    {
+      id: 'getDroneState',
+      name: '获取无人机状态',
+      description: '获取无人机当前状态（特例：作为规划的重要上下文，通过 MCP 协议调用 drone.get_state）',
+      inputSchema: { type: 'object', properties: {} },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          position: {
+            type: 'object',
+            properties: {
+              x: { type: 'number' },
+              y: { type: 'number' },
+              z: { type: 'number' },
+            },
+          },
           isActive: { type: 'boolean' },
           queueLength: { type: 'number' },
         },

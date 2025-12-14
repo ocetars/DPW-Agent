@@ -31,13 +31,13 @@ async function main() {
     skillHandlers: {
       // 注册 plan 技能
       plan: async (input, context) => {
-        const { userRequest, ragHits = [], droneState } = input;
+        const { userRequest, ragHits = [], droneState, availableTools = [] } = input;
         
         if (!userRequest) {
           throw new Error('userRequest is required');
         }
 
-        const result = await plannerAgent.plan(userRequest, ragHits, droneState);
+        const result = await plannerAgent.plan(userRequest, ragHits, droneState, availableTools);
         
         return result;
       },

@@ -6,91 +6,16 @@
 import { getGeminiProvider } from '../../llm/GeminiProvider.js';
 import { createLogger } from '../../utils/logger.js';
 
-// 可用工具定义
-const AVAILABLE_TOOLS = {
-  'drone.get_state': {
-    description: '获取无人机当前状态（位置、是否活跃等）',
-    args: {},
-  },
-  'drone.take_off': {
-    description: '无人机起飞到指定高度',
-    args: {
-      altitude: { type: 'number', default: 1.0, description: '目标高度（米）' },
-    },
-  },
-  'drone.land': {
-    description: '无人机降落到地面',
-    args: {},
-  },
-  'drone.hover': {
-    description: '无人机悬停，取消当前所有任务',
-    args: {},
-  },
-  'drone.move_to': {
-    description: '移动无人机到指定3D坐标位置',
-    args: {
-      x: { type: 'number', required: true, description: 'X坐标' },
-      y: { type: 'number', description: 'Y坐标（高度），不指定则保持当前高度' },
-      z: { type: 'number', required: true, description: 'Z坐标' },
-      maxSpeed: { type: 'number', description: '最大飞行速度（米/秒）' },
-    },
-  },
-  'drone.move_relative': {
-    description: '相对移动（支持 world/body 两种参考系，默认 world：+X向右、+Z向下、+Y向上）',
-    args: {
-      frame: { type: 'string', description: "参考系：'world'(默认) 或 'body'(相对无人机朝向)" },
-      forward: { type: 'number', description: '前进距离（米，正=前进，负=后退）' },
-      right: { type: 'number', description: '右移距离（米，正=向右，负=向左）' },
-      up: { type: 'number', description: '上升距离（米，正=上升，负=下降）' },
-      maxSpeed: { type: 'number', description: '最大飞行速度（米/秒）' },
-    },
-  },
-  'drone.run_mission': {
-    description: '执行航线任务，按顺序飞过一系列航点。每个航点是一个对象，必须包含 type 字段',
-    args: {
-      waypoints: {
-        type: 'array',
-        required: true,
-        description: `航点数组。每个航点必须包含 type 字段，支持以下类型：
-  - { type: "moveTo", x: number, y: number, z: number } - 移动到指定坐标
-  - { type: "takeOff", altitude: number } - 起飞到指定高度
-  - { type: "land" } - 降落
-  - { type: "hover", durationMs: number } - 悬停指定时间(毫秒)
-示例: [{ "type": "moveTo", "x": 2, "y": 1, "z": -2 }, { "type": "moveTo", "x": 4, "y": 1, "z": -2 }]`,
-      },
-    },
-  },
-  'drone.cancel': {
-    description: '取消当前所有任务并悬停',
-    args: {},
-  },
-  'drone.pause': {
-    description: '暂停当前任务执行',
-    args: {},
-  },
-  'drone.resume': {
-    description: '继续执行暂停的任务',
-    args: {},
-  },
-};
+// 系统提示词（工具列表由上游通过 MCP 协议动态注入）
+const SYSTEM_PROMPT = `你是一个无人机飞行任务规划助手。你的任务是根据用户的自然语言请求、地图点位信息、无人机状态，以及“可用工具列表”，生成可执行的无人机控制步骤。
 
-// 系统提示词
-const SYSTEM_PROMPT = `你是一个无人机飞行任务规划助手。你的任务是根据用户的自然语言请求和提供的地图点位信息，生成可执行的无人机控制步骤。
+## 关键约束（必须遵守）
 
-## 可用工具
+1. **只能使用输入里提供的可用工具列表**（工具名称必须完全匹配，不要自行发明工具名）
+2. **参数必须符合对应工具的 inputSchema**（字段名/类型尽量匹配；缺少必要信息时再澄清）
+3. **输出必须是严格 JSON**，不要输出任何额外文字
 
-${Object.entries(AVAILABLE_TOOLS).map(([name, info]) => {
-  const argsDesc = Object.entries(info.args)
-    .map(([argName, argInfo]) => `    - ${argName}: ${argInfo.description}${argInfo.required ? ' (必填)' : ''}`)
-    .join('\n');
-  return `### ${name}
-${info.description}
-${argsDesc ? '参数:\n' + argsDesc : '无参数'}`;
-}).join('\n\n')}
-
-## 输出格式
-
-请严格按照以下 JSON 格式输出：
+## 输出格式（严格遵守）
 
 {
   "reasoning": "你的思考过程，解释为什么这样规划",
@@ -98,8 +23,8 @@ ${argsDesc ? '参数:\n' + argsDesc : '无参数'}`;
   "clarificationQuestion": null,
   "steps": [
     {
-      "tool": "drone.xxx",
-      "args": { ... },
+      "tool": "tool.name",
+      "args": { },
       "description": "这一步做什么"
     }
   ]
@@ -107,22 +32,20 @@ ${argsDesc ? '参数:\n' + argsDesc : '无参数'}`;
 
 ## 规划原则
 
-1. **安全第一**：如果无人机在地面，必须先起飞再移动
+1. **安全第一**：如果无人机在地面，必须先起飞再移动（除非工具/状态明确允许地面移动）
 2. **坐标/相对移动**：
-   - **坐标系约定**：地面平面以中轴交点为原点，**+X 向右、+Z 向下、+Y 向上**；在 frame="world" 下，用户说“前进/向前”默认对应 **-Z（屏幕向上）**。
-   - 如果用户给出“向右/向左/向上/向下/前进/后退”等指令但未明确“相对于朝向”，优先用 **drone.move_relative** 且设置 frame="world"，不要要求用户提供绝对坐标。
-   - 如果用户明确说“相对于无人机当前朝向”，使用 **drone.move_relative** 且设置 frame="body"。
-   - 如果用户提到具体点位（如“去起点/去A点”），优先使用 RAG 检索到的世界坐标（worldX/worldY/worldZ）配合 **drone.move_to**。
-   - 如果用户要求“画形状/走三角形/走正方形”等但未给出尺寸，默认采用 **2 米边长**（安全、可控），并用 move_relative 或 run_mission 实现；仅在确实无法推断时才澄清。
+   - **坐标系约定**：地面平面以中轴交点为原点，**+X 向右、+Z 向下、+Y 向上**；若所选工具采用 world 参考系，用户说“前进/向前”默认对应 **-Z（屏幕向上）**。
+   - 如果用户给出“向右/向左/向上/向下/前进/后退”等指令但未明确“相对于朝向”，优先选择“相对移动”类工具；如果该工具的 inputSchema 支持参考系参数（例如 world/body），则优先选择 world 参考系。
+   - 如果用户明确说“相对于无人机当前朝向”，优先选择“相对移动”类工具；如果该工具支持 body 参考系，则使用 body。
+   - 如果用户提到具体点位（如“去起点/去A点”），优先从 RAG 检索结果中抽取世界坐标并使用“移动到坐标”类工具。
+   - 如果用户要求“画形状/走三角形/走正方形”等但未给出尺寸，默认采用 **2 米边长**（安全、可控）；仅在确实无法推断时才澄清。
 3. **合理高度**：默认飞行高度 1.0 米，除非用户或点位信息指定其他高度
-4. **路径优化**：如果有多个目标点，考虑最短路径
-5. **任务结束**：除非用户要求降落，否则保持悬停状态
+4. **任务结束**：除非用户要求降落，否则保持悬停/保持当前位置（按可用工具选择）
 
 ## 特殊情况处理
 
 - 如果用户请求不明确（如"去那边"但没有具体位置），设置 needsClarification = true 并提出问题
-- 如果没有找到匹配的地图点位，告知用户并建议使用具体坐标
-- 如果用户要求去的地点标记为"危险区"，在 reasoning 中说明风险`;
+- 如果没有找到匹配的地图点位，告知用户并建议使用更具体的地点名或坐标`;
 
 export class PlannerAgent {
   /**
@@ -139,15 +62,16 @@ export class PlannerAgent {
    * @param {string} userRequest - 用户请求
    * @param {Array} ragHits - RAG 检索结果
    * @param {Object} [droneState] - 无人机当前状态
+   * @param {Array} [availableTools] - MCP Server 动态发现的可用工具列表
    * @returns {Promise<Object>} - 执行计划
    */
-  async plan(userRequest, ragHits = [], droneState = null) {
+  async plan(userRequest, ragHits = [], droneState = null, availableTools = []) {
     const startTime = Date.now();
     this.logger.info(`Planning for: "${userRequest.substring(0, 50)}..."`);
 
     try {
       // 构建提示词
-      const prompt = this._buildPrompt(userRequest, ragHits, droneState);
+      const prompt = this._buildPrompt(userRequest, ragHits, droneState, availableTools);
 
       // 调用 Gemini 生成计划
       const result = await this.gemini.generateJSON(prompt, {
@@ -155,7 +79,7 @@ export class PlannerAgent {
       });
 
       // 验证和清洗结果
-      const plan = this._validatePlan(result);
+      const plan = this._validatePlan(result, availableTools);
 
       const durationMs = Date.now() - startTime;
       this.logger.info(`Generated plan with ${plan.steps?.length || 0} steps in ${durationMs}ms`);
@@ -174,8 +98,13 @@ export class PlannerAgent {
    * 构建规划提示词
    * @private
    */
-  _buildPrompt(userRequest, ragHits, droneState) {
+  _buildPrompt(userRequest, ragHits, droneState, availableTools) {
     const parts = [SYSTEM_PROMPT, '', '---', '', '## 当前任务'];
+
+    // 可用工具（来自 MCP listTools）
+    parts.push('**可用工具列表（来自 MCP Server / listTools）**:');
+    parts.push(this._formatToolsForPrompt(availableTools));
+    parts.push('');
 
     // 用户请求
     parts.push(`**用户请求**: ${userRequest}`);
@@ -214,10 +143,47 @@ export class PlannerAgent {
   }
 
   /**
+   * 格式化可用工具列表供提示词使用
+   * @private
+   */
+  _formatToolsForPrompt(availableTools) {
+    if (!Array.isArray(availableTools) || availableTools.length === 0) {
+      return '（未提供可用工具；请设置 needsClarification=true 并说明无法规划）';
+    }
+
+    const lines = [];
+    for (const tool of availableTools) {
+      const name = tool?.name ? String(tool.name) : null;
+      if (!name) continue;
+
+      const description = tool?.description ? String(tool.description) : '';
+      const inputSchema = tool?.inputSchema ?? tool?.parameters ?? tool?.schema ?? null;
+
+      lines.push(`- name: ${name}`);
+      if (description) lines.push(`  description: ${description}`);
+      if (inputSchema) lines.push(`  inputSchema: ${JSON.stringify(inputSchema)}`);
+    }
+
+    return lines.join('\n') || '（可用工具列表为空）';
+  }
+
+  /**
    * 验证和清洗计划
    * @private
    */
-  _validatePlan(result) {
+  _validatePlan(result, availableTools) {
+    const allowedToolNames = new Set(
+      (Array.isArray(availableTools) ? availableTools : [])
+        .map(t => t?.name)
+        .filter(Boolean)
+        .map(String)
+    );
+
+    if (allowedToolNames.size === 0) {
+      // 没有工具列表就无法保证协议一致性，直接失败让上游处理
+      throw new Error('No availableTools provided; cannot generate a valid plan');
+    }
+
     // 确保必要字段存在
     const plan = {
       reasoning: result.reasoning || '',
@@ -229,15 +195,16 @@ export class PlannerAgent {
     // 验证步骤
     if (Array.isArray(result.steps)) {
       for (const step of result.steps) {
-        if (!step.tool || !AVAILABLE_TOOLS[step.tool]) {
-          this.logger.warn(`Invalid tool: ${step.tool}, skipping`);
+        const toolName = step?.tool ? String(step.tool) : '';
+        if (!toolName || !allowedToolNames.has(toolName)) {
+          this.logger.warn(`Invalid tool (not in availableTools): ${toolName || '(empty)'}, skipping`);
           continue;
         }
 
         plan.steps.push({
-          tool: step.tool,
-          args: step.args || {},
-          description: step.description || '',
+          tool: toolName,
+          args: (step.args && typeof step.args === 'object') ? step.args : {},
+          description: step.description ? String(step.description) : '',
         });
       }
     }
@@ -245,13 +212,7 @@ export class PlannerAgent {
     return plan;
   }
 
-  /**
-   * 获取可用工具列表
-   * @returns {Object}
-   */
-  getAvailableTools() {
-    return AVAILABLE_TOOLS;
-  }
+  // 不再暴露硬编码工具列表；工具由 MCP Server 动态发现并注入
 }
 
 // 单例
