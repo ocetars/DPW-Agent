@@ -69,7 +69,7 @@ export class OrchestratorAgent {
     this.a2aClient.registerAgent('planner', plannerUrl);
     this.a2aClient.registerAgent('executor', executorUrl);
 
-    this.logger.info('Registered agents:', { rag: ragUrl, planner: plannerUrl, executor: executorUrl });
+    // this.logger.info('Registered agents:', { rag: ragUrl, planner: plannerUrl, executor: executorUrl });
   }
 
   /**

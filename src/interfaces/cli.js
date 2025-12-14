@@ -55,10 +55,16 @@ function print(text, color = '') {
 
 function printHeader() {
   console.log('');
-  print('╔════════════════════════════════════════════════════════════╗', colors.cyan);
-  print('║          DPW-Agent - 无人机智能控制助手                     ║', colors.cyan);
-  print('║          A2A + RAG + MCP 多Agent系统 (ReAct模式)            ║', colors.cyan);
-  print('╚════════════════════════════════════════════════════════════╝', colors.cyan);
+  // ASCII Art Logo
+  print('    ____  ____ _       __     ___                    __ ', colors.cyan);
+  print('   / __ \\/ __ \\ |     / /    /   | ____ ____  ____  / /_', colors.cyan);
+  print('  / / / / /_/ / | /| / /    / /| |/ __ `/ _ \\/ __ \\/ __/', colors.cyan);
+  print(' / /_/ / ____/| |/ |/ /    / ___ / /_/ /  __/ / / / /_  ', colors.cyan);
+  print('/_____/_/     |__/|__/    /_/  |_\\__, /\\___/_/ /_/\\__/  ', colors.cyan);
+  print('                                /____/                   ', colors.cyan);
+  console.log('');
+  print('A2A + RAG + MCP + ReAct 多 Agent 协作系统', colors.yellow);
+  print('═'.repeat(70), colors.dim);
   console.log('');
   print('架构说明:', colors.dim);
   print('  Orchestrator ──┬──► RAG Agent (向量检索)', colors.dim);
@@ -67,13 +73,13 @@ function printHeader() {
   console.log('');
   print('ReAct 循环: Plan → Execute → Observe → Reflect → (Re-plan)', colors.yellow);
   console.log('');
-  print('命令：', colors.dim);
-  print('  /help    - 显示帮助', colors.dim);
-  print('  /status  - 检查系统状态', colors.dim);
-  print('  /clear   - 清除会话历史', colors.dim);
-  print('  /stream  - 切换流式日志显示', colors.dim);
-  print('  /quit    - 退出', colors.dim);
-  console.log('');
+  // print('命令：', colors.dim);
+  // print('  /help    - 显示帮助', colors.dim);
+  // print('  /status  - 检查系统状态', colors.dim);
+  // print('  /clear   - 清除会话历史', colors.dim);
+  // print('  /stream  - 切换流式日志显示', colors.dim);
+  // print('  /quit    - 退出', colors.dim);
+  // console.log('');
 }
 
 /**
@@ -358,7 +364,7 @@ async function main() {
   });
 
   // 检查依赖
-  print('正在检查系统状态...', colors.yellow);
+  // print('正在检查系统状态...', colors.yellow);
   const deps = await orchestrator.checkDependencies();
   
   const allOk = Object.values(deps).every(v => v);
@@ -374,14 +380,14 @@ async function main() {
     print('  npm run agent:executor', colors.dim);
     console.log('');
   } else {
-    print('✅ 所有 Agent 已就绪', colors.green);
-    console.log('');
+    print('✅ All Agents are ready', colors.green);
+    // console.log('');
   }
 
   // 创建会话
   const sessionId = uuidv4();
-  print(`会话 ID: ${sessionId}`, colors.dim);
-  print(`流式日志: ${streamLoggingEnabled ? '已开启' : '已关闭'} (使用 /stream 切换)`, colors.dim);
+  print(`session ID: ${sessionId}`, colors.dim);
+  // print(`流式日志: ${streamLoggingEnabled ? '已开启' : '已关闭'} (使用 /stream 切换)`, colors.dim);
   console.log('');
 
   // 创建 readline 接口
