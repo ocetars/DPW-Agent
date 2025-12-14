@@ -66,7 +66,7 @@ function printHeader() {
   print('A2A + RAG + MCP + ReAct 多 Agent 协作系统', colors.yellow);
   print('═'.repeat(70), colors.dim);
   console.log('');
-  print('架构说明:', colors.dim);
+  print('架构:', colors.dim);
   print('  Orchestrator ──┬──► RAG Agent (向量检索)', colors.dim);
   print('                 ├──► Planner Agent (LLM规划 + 反思)', colors.dim);
   print('                 └──► Executor Agent (MCP执行)', colors.dim);
