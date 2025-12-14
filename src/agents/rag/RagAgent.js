@@ -1,6 +1,7 @@
 /**
  * RAG Agent
  * 负责：query → embedding → Supabase RPC 检索 → 结果后处理
+ * 极简模式：从检索到的句子中用 LLM 提取坐标
  */
 
 import { getGeminiProvider } from '../../llm/GeminiProvider.js';
@@ -37,23 +38,20 @@ export class RagAgent {
       // 2. 向量检索
       const {
         mapId,
-        tags,
         topK = 5,
         threshold = 0.5,
       } = filters;
 
       const rawResults = await this.supabase.search(queryEmbedding, {
         mapId,
-        tags,
-        topK: topK + 5, // 多检索一些用于后处理
+        topK: topK + 3, // 多检索一些用于后处理
         threshold,
       });
 
-      // 3. 后处理：去重、过滤、排序
+      // 3. 后处理：过滤、排序
       const processedResults = this._postProcess(rawResults, {
         topK,
         threshold,
-        dedupeByName: true,
       });
 
       const durationMs = Date.now() - startTime;
@@ -80,7 +78,6 @@ export class RagAgent {
     const {
       topK = 5,
       threshold = 0.5,
-      dedupeByName = true,
     } = options;
 
     let processed = [...results];
@@ -88,25 +85,10 @@ export class RagAgent {
     // 1. 过滤低于阈值的结果
     processed = processed.filter(r => r.score >= threshold);
 
-    // 2. 按名称去重（保留分数最高的）
-    if (dedupeByName) {
-      const seen = new Map();
-      for (const item of processed) {
-        const name = item.metadata?.name || item.chunkText?.substring(0, 50);
-        if (!name) continue;
-        
-        const existing = seen.get(name);
-        if (!existing || existing.score < item.score) {
-          seen.set(name, item);
-        }
-      }
-      processed = Array.from(seen.values());
-    }
-
-    // 3. 按分数降序排序
+    // 2. 按分数降序排序
     processed.sort((a, b) => b.score - a.score);
 
-    // 4. 截取 topK
+    // 3. 截取 topK
     processed = processed.slice(0, topK);
 
     return processed;
@@ -126,26 +108,10 @@ export class RagAgent {
     
     for (let i = 0; i < hits.length; i++) {
       const hit = hits[i];
-      const { metadata, chunkText, score } = hit;
+      const { chunkText, score } = hit;
       
-      lines.push(`**${i + 1}. ${metadata?.name || '未命名点位'}** (相似度: ${(score * 100).toFixed(1)}%)`);
-      
-      // 坐标信息
-      if (metadata?.worldX != null && metadata?.worldZ != null) {
-        const y = metadata.worldY != null ? `, Y=${metadata.worldY.toFixed(2)}` : '';
-        lines.push(`   - 坐标: X=${metadata.worldX.toFixed(2)}, Z=${metadata.worldZ.toFixed(2)}${y}`);
-      }
-      
-      // 标签
-      if (metadata?.tags && metadata.tags.length > 0) {
-        lines.push(`   - 标签: ${metadata.tags.join(', ')}`);
-      }
-      
-      // 描述文本
-      if (chunkText) {
-        lines.push(`   - 描述: ${chunkText.substring(0, 200)}${chunkText.length > 200 ? '...' : ''}`);
-      }
-      
+      lines.push(`**${i + 1}.** (相似度: ${(score * 100).toFixed(1)}%)`);
+      lines.push(`   ${chunkText}`);
       lines.push('');
     }
 
@@ -153,20 +119,57 @@ export class RagAgent {
   }
 
   /**
-   * 从检索结果中提取坐标
+   * 从检索结果中用 LLM 提取坐标
    * @param {Array} hits - 检索结果
-   * @returns {Array<{name: string, x: number, y: number|null, z: number}>}
+   * @param {string} [targetName] - 目标名称（可选，帮助 LLM 定位）
+   * @returns {Promise<Array<{name: string, x: number, y: number|null, z: number}>>}
    */
-  extractCoordinates(hits) {
-    return hits
-      .filter(hit => hit.metadata?.worldX != null && hit.metadata?.worldZ != null)
-      .map(hit => ({
-        name: hit.metadata.name || 'unnamed',
-        x: hit.metadata.worldX,
-        y: hit.metadata.worldY,
-        z: hit.metadata.worldZ,
-        score: hit.score,
-      }));
+  async extractCoordinates(hits, targetName = null) {
+    if (!hits || hits.length === 0) {
+      return [];
+    }
+
+    // 把所有 chunk 拼成上下文
+    const context = hits.map((hit, i) => `[${i + 1}] ${hit.chunkText}`).join('\n');
+
+    const prompt = `从以下文本中提取所有提到的地点坐标信息。
+
+文本内容：
+${context}
+
+${targetName ? `用户想要找的目标：${targetName}` : ''}
+
+请提取所有能找到的坐标点，返回 JSON 数组格式：
+[
+  { "name": "地点名称", "x": X坐标数值, "y": Y坐标数值或null, "z": Z坐标数值 }
+]
+
+注意：
+- 坐标可能以不同格式出现，如 "X=1.5, Z=2.0" 或 "(1.5, 0, 2.0)" 或 "坐标1.5,2.0"
+- 如果没有Y坐标（高度），设为 null
+- 如果文本中没有任何坐标信息，返回空数组 []
+- 只返回 JSON，不要其他文字`;
+
+    try {
+      const result = await this.gemini.generateJSON(prompt, { temperature: 0.1 });
+      
+      // 验证并规范化结果
+      if (!Array.isArray(result)) {
+        this.logger.warn('LLM returned non-array result for coordinates');
+        return [];
+      }
+
+      return result.map(item => ({
+        name: String(item.name || 'unnamed'),
+        x: typeof item.x === 'number' ? item.x : parseFloat(item.x) || 0,
+        y: item.y != null ? (typeof item.y === 'number' ? item.y : parseFloat(item.y)) : null,
+        z: typeof item.z === 'number' ? item.z : parseFloat(item.z) || 0,
+      })).filter(item => !isNaN(item.x) && !isNaN(item.z));
+
+    } catch (error) {
+      this.logger.error('Failed to extract coordinates with LLM:', error.message);
+      return [];
+    }
   }
 }
 
@@ -183,4 +186,3 @@ export function getRagAgent(config) {
 export function resetRagAgent() {
   instance = null;
 }
-

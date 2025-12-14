@@ -31,7 +31,7 @@ async function main() {
     skillHandlers: {
       // 注册 retrieve 技能
       retrieve: async (input, context) => {
-        const { query, filters = {} } = input;
+        const { query, filters = {}, extractCoords = false, targetName = null } = input;
         
         if (!query) {
           throw new Error('query is required');
@@ -39,11 +39,17 @@ async function main() {
 
         const result = await ragAgent.retrieve(query, filters);
         
+        // 如果需要提取坐标，用 LLM 从句子中提取
+        let coordinates = [];
+        if (extractCoords && result.hits.length > 0) {
+          coordinates = await ragAgent.extractCoordinates(result.hits, targetName);
+        }
+
         return {
           hits: result.hits,
           totalFound: result.totalFound,
           formattedContext: ragAgent.formatHitsAsContext(result.hits),
-          coordinates: ragAgent.extractCoordinates(result.hits),
+          coordinates,
           durationMs: result.durationMs,
         };
       },
@@ -72,4 +78,3 @@ main().catch(error => {
   logger.error('Failed to start RAG Agent:', error);
   process.exit(1);
 });
-

@@ -1,6 +1,7 @@
 /**
  * Supabase Vector Store Client
  * 对接 Supabase RPC (match_documents) 进行向量检索
+ * 极简结构：chunk_text + embedding + map_id
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -33,7 +34,6 @@ export class SupabaseVectorClient {
    * @param {number[]} queryEmbedding - 查询向量
    * @param {Object} [options] - 检索选项
    * @param {string} [options.mapId] - 地图 ID 过滤
-   * @param {string[]} [options.tags] - 标签过滤
    * @param {number} [options.topK=5] - 返回数量
    * @param {number} [options.threshold=0.5] - 相似度阈值
    * @returns {Promise<Array>} - 检索结果
@@ -41,7 +41,6 @@ export class SupabaseVectorClient {
   async search(queryEmbedding, options = {}) {
     const {
       mapId,
-      tags,
       topK = 5,
       threshold = 0.5,
     } = options;
@@ -50,12 +49,11 @@ export class SupabaseVectorClient {
 
     try {
       // 调用 Supabase RPC 函数
-      // 预期 RPC 函数签名: match_documents(query_embedding, match_count, filter_map_id, filter_tags, match_threshold)
       const { data, error } = await this.client.rpc(this.rpcFunction, {
         query_embedding: queryEmbedding,
         match_count: topK,
         filter_map_id: mapId || null,
-        filter_tags: tags || null,
+        filter_tags: null, // 不再使用 tags
         match_threshold: threshold,
       });
 
@@ -64,7 +62,7 @@ export class SupabaseVectorClient {
         throw new Error(`Supabase RPC failed: ${error.message}`);
       }
 
-      // 规范化返回结构
+      // 规范化返回结构（极简）
       const results = this._normalizeResults(data || []);
       this.logger.debug(`Found ${results.length} results`);
       
@@ -76,29 +74,15 @@ export class SupabaseVectorClient {
   }
 
   /**
-   * 规范化检索结果
-   * 将 Supabase 返回的数据转换为统一格式
+   * 规范化检索结果（极简结构）
    * @private
    */
   _normalizeResults(data) {
     return data.map(item => ({
-      // 核心字段
-      chunkText: item.chunk_text || item.content || item.summary_text || '',
-      score: item.similarity || item.score || 0,
-      
-      // 元数据（包含坐标等）
-      metadata: {
-        id: item.id,
-        name: item.name || item.point_name || '',
-        worldX: item.world_x ?? item.x ?? null,
-        worldY: item.world_y ?? item.y ?? null,
-        worldZ: item.world_z ?? item.z ?? null,
-        tags: item.tags || [],
-        mapId: item.map_id || null,
-        rawNotes: item.raw_notes || item.notes || '',
-        // 保留原始数据供调试
-        _raw: item,
-      },
+      id: item.id,
+      chunkText: item.chunk_text || '',
+      score: item.similarity || 0,
+      mapId: item.map_id || null,
     }));
   }
 
@@ -111,31 +95,55 @@ export class SupabaseVectorClient {
   }
 
   /**
-   * 直接查询表（不使用向量检索）
-   * @param {string} table - 表名
-   * @param {Object} filters - 过滤条件
-   * @returns {Promise<Array>}
+   * 插入文档（用于导入数据）
+   * @param {Object} doc - 文档
+   * @param {string} doc.chunkText - 文本内容
+   * @param {number[]} doc.embedding - 向量
+   * @param {string} [doc.mapId] - 地图 ID
+   * @returns {Promise<Object>}
    */
-  async queryTable(table, filters = {}) {
-    let query = this.client.from(table).select('*');
+  async insert(doc) {
+    const { chunkText, embedding, mapId } = doc;
 
-    if (filters.mapId) {
-      query = query.eq('map_id', filters.mapId);
-    }
-    if (filters.tags && filters.tags.length > 0) {
-      query = query.contains('tags', filters.tags);
-    }
-    if (filters.limit) {
-      query = query.limit(filters.limit);
-    }
-
-    const { data, error } = await query;
+    const { data, error } = await this.client
+      .from('documents')
+      .insert({
+        chunk_text: chunkText,
+        embedding: `[${embedding.join(',')}]`,
+        map_id: mapId || null,
+      })
+      .select()
+      .single();
 
     if (error) {
-      throw new Error(`Query failed: ${error.message}`);
+      throw new Error(`Insert failed: ${error.message}`);
     }
 
-    return data || [];
+    return data;
+  }
+
+  /**
+   * 批量插入文档
+   * @param {Array<Object>} docs - 文档数组
+   * @returns {Promise<Array>}
+   */
+  async insertBatch(docs) {
+    const rows = docs.map(doc => ({
+      chunk_text: doc.chunkText,
+      embedding: `[${doc.embedding.join(',')}]`,
+      map_id: doc.mapId || null,
+    }));
+
+    const { data, error } = await this.client
+      .from('documents')
+      .insert(rows)
+      .select();
+
+    if (error) {
+      throw new Error(`Batch insert failed: ${error.message}`);
+    }
+
+    return data;
   }
 }
 
@@ -160,4 +168,3 @@ export function getSupabaseClient(config) {
 export function resetSupabaseClient() {
   instance = null;
 }
-

@@ -8,6 +8,7 @@ import { createLogger } from '../utils/logger.js';
 
 const DEFAULT_MODEL = 'gemini-2.5-flash';
 const DEFAULT_EMBEDDING_MODEL = 'gemini-embedding-001';
+const DEFAULT_EMBEDDING_DIMENSIONS = 768; // gemini-embedding-001 支持 128-3072，推荐 768
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
 
@@ -122,15 +123,22 @@ export class GeminiProvider {
   /**
    * 生成 Embedding 向量
    * @param {string} text - 输入文本
+   * @param {Object} [options] - 选项
+   * @param {number} [options.dimensions=768] - 输出维度 (128-3072)
    * @returns {Promise<number[]>} - Embedding 向量
    */
-  async embed(text) {
+  async embed(text, options = {}) {
+    const dimensions = options.dimensions || DEFAULT_EMBEDDING_DIMENSIONS;
+    
     return this._withRetry(async () => {
       const model = this.genAI.getGenerativeModel({
         model: this.embeddingModelName,
       });
 
-      const result = await model.embedContent(text);
+      const result = await model.embedContent({
+        content: { parts: [{ text }] },
+        outputDimensionality: dimensions,
+      });
       const embedding = result.embedding.values;
       
       this.logger.debug(`Generated embedding with ${embedding.length} dimensions`);
@@ -141,16 +149,23 @@ export class GeminiProvider {
   /**
    * 批量生成 Embedding 向量
    * @param {string[]} texts - 输入文本数组
+   * @param {Object} [options] - 选项
+   * @param {number} [options.dimensions=768] - 输出维度 (128-3072)
    * @returns {Promise<number[][]>} - Embedding 向量数组
    */
-  async embedBatch(texts) {
+  async embedBatch(texts, options = {}) {
+    const dimensions = options.dimensions || DEFAULT_EMBEDDING_DIMENSIONS;
+    
     return this._withRetry(async () => {
       const model = this.genAI.getGenerativeModel({
         model: this.embeddingModelName,
       });
 
       const result = await model.batchEmbedContents({
-        requests: texts.map(text => ({ content: { parts: [{ text }] } })),
+        requests: texts.map(text => ({
+          content: { parts: [{ text }] },
+          outputDimensionality: dimensions,
+        })),
       });
 
       const embeddings = result.embeddings.map(e => e.values);

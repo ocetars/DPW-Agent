@@ -12,7 +12,8 @@
     "agent:planner": "node src/agents/planner/server.js",
     "agent:rag": "node src/agents/rag/server.js",
     "agent:executor": "node src/agents/executor/server.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "seed": "node scripts/seed-demo-data.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
