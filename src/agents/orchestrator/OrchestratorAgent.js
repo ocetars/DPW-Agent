@@ -507,10 +507,11 @@ export class OrchestratorAgent {
    * @private
    */
   async _callExecutor(steps, sessionId) {
+    const timeout = this._estimateExecutorTimeoutMs(steps);
     return this.a2aClient.submitTask('executor', 'execute', {
       steps,
       stopOnError: true,
-    }, { sessionId, timeout: 120000 });
+    }, { sessionId, timeout });
   }
 
   /**
@@ -518,10 +519,11 @@ export class OrchestratorAgent {
    * @private
    */
   async _callExecutorWithProgress(steps, sessionId, requestId) {
+    const timeout = this._estimateExecutorTimeoutMs(steps);
     const result = await this.a2aClient.submitTask('executor', 'execute', {
       steps,
       stopOnError: true,
-    }, { sessionId, timeout: 120000 });
+    }, { sessionId, timeout });
 
     // 回放步骤日志
     if (result.success && result.output?.results) {
@@ -546,6 +548,24 @@ export class OrchestratorAgent {
     }
 
     return result;
+  }
+
+  /**
+   * 估算 Executor A2A 调用超时（毫秒）
+   * - 默认 2 分钟
+   * - 包含 drone.run_mission 时，按长任务设置更长超时（默认 30 分钟，可通过环境变量覆盖）
+   * @private
+   */
+  _estimateExecutorTimeoutMs(steps) {
+    const DEFAULT_EXECUTOR_TIMEOUT_MS = parseInt(process.env.A2A_EXECUTOR_TIMEOUT_MS || '120000', 10);
+    const MISSION_TIMEOUT_MS = parseInt(process.env.A2A_EXECUTOR_MISSION_TIMEOUT_MS || '1800000', 10); // 30min
+
+    if (!Array.isArray(steps) || steps.length === 0) {
+      return DEFAULT_EXECUTOR_TIMEOUT_MS;
+    }
+
+    const hasMission = steps.some(s => s?.tool === 'drone.run_mission');
+    return hasMission ? Math.max(DEFAULT_EXECUTOR_TIMEOUT_MS, MISSION_TIMEOUT_MS) : DEFAULT_EXECUTOR_TIMEOUT_MS;
   }
 
   /**

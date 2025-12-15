@@ -191,7 +191,25 @@ export class ExecutorAgent {
     this.logger.debug(`Executing: ${tool}`, args);
 
     // 调用 MCP 工具
-    return this.mcpClient.callTool(tool, args);
+    const requestOptions = {};
+
+    // 允许上层按步骤传入超时（毫秒）
+    if (typeof step.timeoutMs === 'number' && Number.isFinite(step.timeoutMs) && step.timeoutMs > 0) {
+      requestOptions.timeout = step.timeoutMs;
+    }
+
+    // 关键：航线任务是长时间运行的（会持续 progress），不能用 SDK 默认 60s 超时
+    if (tool === 'drone.run_mission') {
+      const DEFAULT_MISSION_TIMEOUT_MS = parseInt(process.env.MCP_MISSION_TIMEOUT_MS || '1800000', 10); // 30min
+      const timeout = Math.max(requestOptions.timeout || 0, DEFAULT_MISSION_TIMEOUT_MS);
+      requestOptions.timeout = timeout;
+      // 保险：即便后续加入 MCP progress 通知，也希望 progress 能刷新超时
+      requestOptions.resetTimeoutOnProgress = true;
+      // 可选：限制最长总等待时间，避免“无限挂起”
+      requestOptions.maxTotalTimeout = timeout;
+    }
+
+    return this.mcpClient.callTool(tool, args, requestOptions);
   }
 
   /**

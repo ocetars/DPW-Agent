@@ -114,9 +114,10 @@ export class McpClientWrapper {
    * 调用工具
    * @param {string} toolName - 工具名称
    * @param {Object} [args] - 工具参数
+   * @param {import('@modelcontextprotocol/sdk/shared/protocol.js').RequestOptions} [requestOptions] - MCP 请求选项（如 timeout）
    * @returns {Promise<Object>} - 工具执行结果
    */
-  async callTool(toolName, args = {}) {
+  async callTool(toolName, args = {}, requestOptions) {
     if (!this.connected) {
       throw new Error('Not connected to MCP Server');
     }
@@ -124,10 +125,17 @@ export class McpClientWrapper {
     this.logger.debug(`Calling tool: ${toolName}`, args);
 
     try {
-      const result = await this.client.callTool({
-        name: toolName,
-        arguments: args,
-      });
+      // NOTE:
+      // MCP SDK 默认请求超时为 60s（DEFAULT_REQUEST_TIMEOUT_MSEC）。
+      // 对于无人机航线/长任务，需要允许调用方传入更长的 timeout。
+      const result = await this.client.callTool(
+        {
+          name: toolName,
+          arguments: args,
+        },
+        undefined,
+        requestOptions
+      );
 
       // 解析结果
       const content = result.content || [];
