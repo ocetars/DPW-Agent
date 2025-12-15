@@ -21,6 +21,7 @@ const SYSTEM_PROMPT = `你是一个无人机飞行任务规划助手。你的任
   "reasoning": "你的思考过程，解释为什么这样规划",
   "needsClarification": false,
   "clarificationQuestion": null,
+  "missingLocations": [],
   "steps": [
     {
       "tool": "tool.name",
@@ -29,6 +30,15 @@ const SYSTEM_PROMPT = `你是一个无人机飞行任务规划助手。你的任
     }
   ]
 }
+
+## missingLocations 字段说明
+
+当 needsClarification = true 且原因是**缺少地图点位坐标信息**时，必须填写 missingLocations 数组：
+- 列出所有在 RAG 检索结果中找不到坐标的点位名称
+- 例如用户说"飞过2号、3号、6号"，但只找到2号坐标，则 missingLocations = ["3号", "6号"]
+- 这样系统可以针对缺失的点位重新检索
+
+如果 needsClarification = true 但原因是**用户请求本身不明确**（如"去那边"），则 missingLocations 保持空数组。
 
 ## 规划原则
 
@@ -189,8 +199,16 @@ export class PlannerAgent {
       reasoning: result.reasoning || '',
       needsClarification: Boolean(result.needsClarification),
       clarificationQuestion: result.clarificationQuestion || null,
+      missingLocations: [], // 缺失的地图点位信息
       steps: [],
     };
+
+    // 处理 missingLocations（缺失的地图点位）
+    if (Array.isArray(result.missingLocations)) {
+      plan.missingLocations = result.missingLocations
+        .filter(loc => loc && typeof loc === 'string')
+        .map(loc => loc.trim());
+    }
 
     // 验证步骤
     if (Array.isArray(result.steps)) {

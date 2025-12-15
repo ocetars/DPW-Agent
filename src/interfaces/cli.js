@@ -176,7 +176,13 @@ function handleStreamEvent(event) {
 
     // ===== RAG 调用 =====
     case LogEventType.AGENT_CALL_START:
-      if (event.agent === AgentName.RAG) {
+      if (event.agent === AgentName.RAG && event.action === 'smartRetrieve') {
+        console.log('');
+        printFlow(AgentName.ORCHESTRATOR, AgentName.RAG, '智能向量检索');
+        printAgentAction(AgentName.RAG, '解析用户意图 + 查询 Supabase 向量数据库...');
+      } else if (event.agent === AgentName.RAG && event.action === 'retrieveMissing') {
+        // RAG 重试时的日志由 RAG_RETRY_START 处理
+      } else if (event.agent === AgentName.RAG) {
         console.log('');
         printFlow(AgentName.ORCHESTRATOR, AgentName.RAG, '向量检索');
         printAgentAction(AgentName.RAG, '查询 Supabase 向量数据库...');
@@ -188,6 +194,43 @@ function handleStreamEvent(event) {
         console.log('');
         printFlow(AgentName.ORCHESTRATOR, AgentName.EXECUTOR, '执行任务');
       }
+      break;
+
+    // ===== RAG 意图解析完成 =====
+    case LogEventType.RAG_INTENT_PARSED:
+      if (event.targets && event.targets.length > 0) {
+        const items = event.targets.map((t, i) => 
+          `${colors.yellow}#${i + 1}${colors.reset} ${t}`
+        );
+        printDetailBlock(`解析出 ${event.targets.length} 个查询目标`, items);
+        if (event.reasoning) {
+          console.log(`${colors.dim}    └─ 推理: ${event.reasoning}${colors.reset}`);
+        }
+      }
+      break;
+
+    // ===== RAG 重试开始 =====
+    case LogEventType.RAG_RETRY_START:
+      console.log('');
+      printAgentAction(AgentName.RAG, `${colors.yellow}🔄 RAG 重试${colors.reset}`, `第 ${event.retryCount} 次`);
+      if (event.missingTargets && event.missingTargets.length > 0) {
+        const targetStr = event.missingTargets.join(', ');
+        console.log(`${colors.dim}    └─ 缺失目标: ${colors.yellow}${targetStr}${colors.reset}`);
+      }
+      printFlow(AgentName.ORCHESTRATOR, AgentName.RAG, '针对缺失目标重新检索');
+      break;
+
+    // ===== RAG 重试结果 =====
+    case LogEventType.RAG_RETRY_RESULT:
+      if (event.newHitCount > 0 && event.topHits) {
+        const items = event.topHits.map((h, i) => 
+          `${colors.green}#${i + 1}${colors.reset} ${h.text}... ${colors.dim}(${(h.score * 100).toFixed(0)}%)${colors.reset}`
+        );
+        printDetailBlock(`重试找到 ${event.newHitCount} 个新结果`, items);
+      } else {
+        printAgentAction(AgentName.RAG, `${colors.yellow}重试未找到新结果${colors.reset}`, `目标: ${event.missingTargets?.join(', ')}`);
+      }
+      printReturn(AgentName.ORCHESTRATOR, AgentName.RAG, `${event.newHitCount} 条新结果`, event.durationMs);
       break;
 
     // ===== RAG 结果 =====
@@ -220,7 +263,11 @@ function handleStreamEvent(event) {
         });
         printDetailBlock(`生成 ${event.stepCount} 步执行计划`, items);
       } else if (event.needsClarification) {
-        printAgentAction(AgentName.PLANNER, '需要澄清用户意图');
+        printAgentAction(AgentName.PLANNER, `${colors.yellow}需要澄清用户意图${colors.reset}`);
+        // 显示缺失的地图点位（如果有）
+        if (event.missingLocations && event.missingLocations.length > 0) {
+          console.log(`${colors.dim}    └─ 缺失点位: ${colors.red}${event.missingLocations.join(', ')}${colors.reset}`);
+        }
       }
       printReturn(AgentName.ORCHESTRATOR, AgentName.PLANNER, `${event.stepCount} 个步骤`, event.durationMs);
       break;
@@ -347,6 +394,9 @@ async function main() {
       LogEventType.AGENT_CALL_START,
       LogEventType.AGENT_CALL_ERROR,
       LogEventType.RAG_RESULT,
+      LogEventType.RAG_INTENT_PARSED,    // 智能检索意图解析
+      LogEventType.RAG_RETRY_START,      // RAG 重试开始
+      LogEventType.RAG_RETRY_RESULT,     // RAG 重试结果
       LogEventType.PLANNER_RESULT,
       LogEventType.REFLECT_START,
       LogEventType.REFLECT_RESULT,

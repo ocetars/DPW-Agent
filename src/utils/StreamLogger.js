@@ -51,6 +51,9 @@ export const LogEventType = {
   RAG_EMBEDDING: 'rag:embedding',
   RAG_SEARCH: 'rag:search',
   RAG_RESULT: 'rag:result',
+  RAG_INTENT_PARSED: 'rag:intent:parsed',      // 智能检索意图解析完成
+  RAG_RETRY_START: 'rag:retry:start',          // RAG 重试开始
+  RAG_RETRY_RESULT: 'rag:retry:result',        // RAG 重试结果
 
   // Planner 相关
   PLANNER_START: 'planner:start',
@@ -279,6 +282,51 @@ class StreamLogger extends EventEmitter {
     });
   }
 
+  /**
+   * RAG 智能检索意图解析完成
+   */
+  ragIntentParsed(requestId, intent, durationMs) {
+    this.log(LogEventType.RAG_INTENT_PARSED, {
+      requestId,
+      agent: AgentName.RAG,
+      phase: '意图解析完成',
+      targets: intent.targets || [],
+      reasoning: intent.reasoning?.substring(0, 100),
+      durationMs,
+    });
+  }
+
+  /**
+   * RAG 重试开始
+   */
+  ragRetryStart(requestId, missingTargets, retryCount) {
+    this.log(LogEventType.RAG_RETRY_START, {
+      requestId,
+      agent: AgentName.RAG,
+      phase: `RAG 重试 (第 ${retryCount} 次)`,
+      missingTargets,
+      retryCount,
+    });
+  }
+
+  /**
+   * RAG 重试结果
+   */
+  ragRetryResult(requestId, missingTargets, newHits, durationMs) {
+    this.log(LogEventType.RAG_RETRY_RESULT, {
+      requestId,
+      agent: AgentName.RAG,
+      phase: 'RAG 重试完成',
+      missingTargets,
+      newHitCount: newHits.length,
+      topHits: newHits.slice(0, 3).map(h => ({
+        score: h.score,
+        text: h.chunkText?.substring(0, 60),
+      })),
+      durationMs,
+    });
+  }
+
   // ==================== Planner 相关 ====================
 
   plannerStart(requestId, userRequest) {
@@ -320,6 +368,7 @@ class StreamLogger extends EventEmitter {
       })),
       reasoning: plan.reasoning?.substring(0, 200),
       needsClarification: plan.needsClarification,
+      missingLocations: plan.missingLocations || [], // 缺失的地图点位
       durationMs,
     });
   }

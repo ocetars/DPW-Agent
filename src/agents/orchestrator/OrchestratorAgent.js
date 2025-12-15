@@ -31,6 +31,7 @@ import { v4 as uuidv4 } from 'uuid';
 const REACT_CONFIG = {
   maxIterations: 3,           // 最大迭代次数（防止无限循环）
   minConfidenceToStop: 0.8,   // 反思置信度达到此值时停止循环
+  maxRagRetries: 2,           // RAG 重试最大次数（当 Planner 发现缺失信息时）
 };
 
 export class OrchestratorAgent {
@@ -108,21 +109,34 @@ export class OrchestratorAgent {
     session.history.push({ role: 'user', content: message, timestamp: Date.now() });
 
     try {
-      // ===== 阶段 1: RAG 检索 =====
+      // ===== 阶段 1: RAG 智能检索 =====
       let ragHits = [];
+      let ragIntent = null; // 保存解析的用户意图
+      let ragTargetResults = {}; // 保存每个目标的检索结果
       
       if (this.config.ragEnabled) {
         try {
-          this.streamLogger.agentCallStart(requestId, AgentName.RAG, 'retrieve', { query: message.substring(0, 50) });
+          this.streamLogger.agentCallStart(requestId, AgentName.RAG, 'smartRetrieve', { query: message.substring(0, 50) });
           const ragStartTime = Date.now();
           
-          const ragResult = await this._callRag(message, { mapId, ...filters }, sessionId);
+          // 使用智能检索（会先解析意图，再针对每个目标分别检索）
+          const ragResult = await this._callRagSmart(message, { mapId, ...filters }, sessionId);
           ragHits = ragResult.output?.hits || [];
+          ragIntent = ragResult.output?.intent || null;
+          ragTargetResults = ragResult.output?.targetResults || {};
+          
+          // 发出意图解析日志
+          if (ragIntent) {
+            this.streamLogger.ragIntentParsed(requestId, ragIntent, ragResult.output?.durationMs);
+          }
           
           this.streamLogger.ragResult(requestId, ragHits, Date.now() - ragStartTime);
-          this.streamLogger.agentCallEnd(requestId, AgentName.RAG, 'retrieve', { hitCount: ragHits.length }, Date.now() - ragStartTime);
+          this.streamLogger.agentCallEnd(requestId, AgentName.RAG, 'smartRetrieve', { 
+            hitCount: ragHits.length,
+            targets: ragIntent?.targets || [],
+          }, Date.now() - ragStartTime);
         } catch (error) {
-          this.streamLogger.agentCallError(requestId, AgentName.RAG, 'retrieve', error);
+          this.streamLogger.agentCallError(requestId, AgentName.RAG, 'smartRetrieve', error);
           this.logger.warn(`[${sessionId}] RAG failed, continuing without context:`, error.message);
         }
       }
@@ -132,6 +146,9 @@ export class OrchestratorAgent {
 
       // ===== 阶段 1.6: 发现可用工具 =====
       let availableTools = await this._getAvailableToolsSafe(requestId, sessionId);
+      
+      // RAG 重试计数器
+      let ragRetryCount = 0;
 
       // ===== ReAct 循环 =====
       const allToolCalls = [];
@@ -164,8 +181,58 @@ export class OrchestratorAgent {
         this.streamLogger.plannerResult(requestId, currentPlan, Date.now() - planStartTime);
         this.streamLogger.agentCallEnd(requestId, AgentName.PLANNER, 'plan', { stepCount: currentPlan.steps?.length || 0 }, Date.now() - planStartTime);
 
-        // ===== 阶段 3: 如果需要澄清，直接返回 =====
+        // ===== 阶段 3: 如果需要澄清，尝试 RAG 重试或返回 =====
         if (currentPlan.needsClarification) {
+          const missingLocations = currentPlan.missingLocations || [];
+          
+          // 如果有缺失的地图点位信息，且未超过重试次数，尝试重新检索
+          if (missingLocations.length > 0 && ragRetryCount < REACT_CONFIG.maxRagRetries) {
+            ragRetryCount++;
+            this.logger.info(`[${sessionId}] Planner missing ${missingLocations.length} locations, RAG retry ${ragRetryCount}/${REACT_CONFIG.maxRagRetries}`);
+            
+            try {
+              // 发出 RAG 重试开始日志
+              this.streamLogger.ragRetryStart(requestId, missingLocations, ragRetryCount);
+              this.streamLogger.agentCallStart(requestId, AgentName.RAG, 'retrieveMissing', { 
+                missingTargets: missingLocations,
+                retryCount: ragRetryCount,
+              });
+              const ragRetryStartTime = Date.now();
+              
+              // 针对缺失的点位重新检索
+              const retryResult = await this._callRagMissing(missingLocations, { mapId, ...filters }, sessionId);
+              const retryHits = retryResult.output?.hits || [];
+              
+              // 发出 RAG 重试结果日志
+              this.streamLogger.ragRetryResult(requestId, missingLocations, retryHits, Date.now() - ragRetryStartTime);
+              this.streamLogger.agentCallEnd(requestId, AgentName.RAG, 'retrieveMissing', { 
+                hitCount: retryHits.length,
+                missingTargets: missingLocations,
+              }, Date.now() - ragRetryStartTime);
+              
+              // 合并新的检索结果（去重）
+              if (retryHits.length > 0) {
+                const existingChunks = new Set(ragHits.map(h => h.chunkText));
+                for (const hit of retryHits) {
+                  if (!existingChunks.has(hit.chunkText)) {
+                    ragHits.push(hit);
+                    existingChunks.add(hit.chunkText);
+                  }
+                }
+                this.logger.info(`[${sessionId}] RAG retry found ${retryHits.length} new hits, total now ${ragHits.length}`);
+                
+                // 继续下一轮 ReAct 迭代（重新规划）
+                continue;
+              } else {
+                this.logger.info(`[${sessionId}] RAG retry found no new results for: ${missingLocations.join(', ')}`);
+              }
+            } catch (error) {
+              this.streamLogger.agentCallError(requestId, AgentName.RAG, 'retrieveMissing', error);
+              this.logger.warn(`[${sessionId}] RAG retry failed:`, error.message);
+            }
+          }
+          
+          // RAG 重试无效或已达上限，返回澄清请求
           const response = {
             sessionId,
             requestId,
@@ -174,6 +241,8 @@ export class OrchestratorAgent {
             toolCalls: allToolCalls,
             ragHits,
             needsClarification: true,
+            missingLocations,
+            ragRetries: ragRetryCount,
             reactIterations: iteration,
             durationMs: Date.now() - startTime,
           };
@@ -357,12 +426,34 @@ export class OrchestratorAgent {
   }
 
   /**
-   * 调用 RAG Agent
+   * 调用 RAG Agent（普通检索）
    * @private
    */
   async _callRag(query, filters, sessionId) {
     return this.a2aClient.submitTask('rag', 'retrieve', {
       query,
+      filters,
+    }, { sessionId, timeout: 30000 });
+  }
+
+  /**
+   * 调用 RAG Agent（智能检索 - 会先解析意图）
+   * @private
+   */
+  async _callRagSmart(query, filters, sessionId) {
+    return this.a2aClient.submitTask('rag', 'smartRetrieve', {
+      query,
+      filters,
+    }, { sessionId, timeout: 45000 }); // 稍长超时因为需要多次检索
+  }
+
+  /**
+   * 调用 RAG Agent（针对缺失目标重新检索）
+   * @private
+   */
+  async _callRagMissing(missingTargets, filters, sessionId) {
+    return this.a2aClient.submitTask('rag', 'retrieveMissing', {
+      missingTargets,
       filters,
     }, { sessionId, timeout: 30000 });
   }

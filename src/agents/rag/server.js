@@ -29,7 +29,7 @@ async function main() {
     agentCard,
     port,
     skillHandlers: {
-      // 注册 retrieve 技能
+      // 注册 retrieve 技能（向后兼容）
       retrieve: async (input, context) => {
         const { query, filters = {}, extractCoords = false, targetName = null } = input;
         
@@ -50,6 +50,53 @@ async function main() {
           totalFound: result.totalFound,
           formattedContext: ragAgent.formatHitsAsContext(result.hits),
           coordinates,
+          durationMs: result.durationMs,
+        };
+      },
+
+      // 智能检索：先用 LLM 解析意图，再针对每个目标分别检索
+      smartRetrieve: async (input, context) => {
+        const { query, filters = {}, extractCoords = false, targetName = null } = input;
+        
+        if (!query) {
+          throw new Error('query is required');
+        }
+
+        const result = await ragAgent.smartRetrieve(query, filters);
+        
+        // 如果需要提取坐标，用 LLM 从句子中提取
+        let coordinates = [];
+        if (extractCoords && result.hits.length > 0) {
+          coordinates = await ragAgent.extractCoordinates(result.hits, targetName);
+        }
+
+        return {
+          hits: result.hits,
+          totalFound: result.totalFound,
+          intent: result.intent,           // 解析出的用户意图
+          targetResults: result.targetResults, // 每个目标的检索结果
+          formattedContext: ragAgent.formatHitsAsContext(result.hits),
+          coordinates,
+          durationMs: result.durationMs,
+        };
+      },
+
+      // 针对缺失目标重新检索
+      retrieveMissing: async (input, context) => {
+        const { missingTargets, filters = {} } = input;
+        
+        if (!missingTargets || !Array.isArray(missingTargets) || missingTargets.length === 0) {
+          throw new Error('missingTargets array is required');
+        }
+
+        const result = await ragAgent.retrieveMissing(missingTargets, filters);
+
+        return {
+          hits: result.hits,
+          totalFound: result.totalFound,
+          missingTargets: result.missingTargets,
+          targetResults: result.targetResults,
+          formattedContext: ragAgent.formatHitsAsContext(result.hits),
           durationMs: result.durationMs,
         };
       },

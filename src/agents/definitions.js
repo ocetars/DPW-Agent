@@ -120,6 +120,11 @@ export const PlannerAgentCard = createAgentCard({
           reasoning: { type: 'string', description: '规划推理过程' },
           needsClarification: { type: 'boolean', description: '是否需要用户澄清' },
           clarificationQuestion: { type: 'string', description: '澄清问题' },
+          missingLocations: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '缺失的地图点位名称列表（当 needsClarification=true 且原因是缺少坐标时填写）',
+          },
         },
       },
     },
@@ -168,17 +173,18 @@ export const PlannerAgentCard = createAgentCard({
 /**
  * RAG Agent Card
  * embedding + Supabase RPC 检索 + 结果清洗/过滤
+ * 增强：LLM 意图解析 + 多目标分别检索 + 缺失目标重检索
  */
 export const RagAgentCard = createAgentCard({
   name: 'rag',
-  description: 'RAG 检索 Agent，负责将查询转为向量并从 Supabase 检索相关地图点位知识',
+  description: 'RAG 检索 Agent，负责将查询转为向量并从 Supabase 检索相关地图点位知识。支持智能意图解析和多目标检索。',
   url: getAgentUrl('rag'),
-  version: '1.0.0',
+  version: '1.1.0',
   skills: [
     {
       id: 'retrieve',
       name: '知识检索',
-      description: '根据查询文本检索相关的地图点位知识',
+      description: '根据查询文本检索相关的地图点位知识（基础版本）',
       inputSchema: {
         type: 'object',
         properties: {
@@ -219,6 +225,84 @@ export const RagAgentCard = createAgentCard({
             },
           },
           totalFound: { type: 'number' },
+        },
+      },
+    },
+    {
+      id: 'smartRetrieve',
+      name: '智能知识检索',
+      description: '先用 LLM 解析用户意图，提取所有需要查询的地标/点位，然后针对每个目标分别检索并合并结果',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: '用户原始查询文本' },
+          filters: {
+            type: 'object',
+            properties: {
+              mapId: { type: 'string', description: '地图 ID' },
+              topK: { type: 'number', description: '返回数量', default: 5 },
+              threshold: { type: 'number', description: '相似度阈值', default: 0.5 },
+            },
+          },
+        },
+        required: ['query'],
+      },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          hits: { type: 'array', description: '合并后的检索结果' },
+          totalFound: { type: 'number' },
+          intent: {
+            type: 'object',
+            description: 'LLM 解析出的用户意图',
+            properties: {
+              reasoning: { type: 'string', description: '解析推理' },
+              targets: { type: 'array', items: { type: 'string' }, description: '需要查询的目标列表' },
+              originalQuery: { type: 'string', description: '原始查询' },
+            },
+          },
+          targetResults: {
+            type: 'object',
+            description: '每个目标的检索结果映射',
+            additionalProperties: { type: 'array' },
+          },
+        },
+      },
+    },
+    {
+      id: 'retrieveMissing',
+      name: '缺失目标检索',
+      description: '针对 Planner 反馈的缺失地图点位，用多种搜索策略重新检索',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          missingTargets: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '缺失的目标列表（来自 Planner 的 missingLocations）',
+          },
+          filters: {
+            type: 'object',
+            properties: {
+              mapId: { type: 'string' },
+              topK: { type: 'number', default: 3 },
+              threshold: { type: 'number', default: 0.4 }, // 更宽容的阈值
+            },
+          },
+        },
+        required: ['missingTargets'],
+      },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          hits: { type: 'array', description: '检索结果' },
+          totalFound: { type: 'number' },
+          missingTargets: { type: 'array', description: '原始缺失目标列表' },
+          targetResults: {
+            type: 'object',
+            description: '每个缺失目标的检索结果',
+            additionalProperties: { type: 'array' },
+          },
         },
       },
     },
