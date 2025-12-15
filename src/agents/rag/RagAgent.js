@@ -153,8 +153,8 @@ export class RagAgent {
     try {
       const {
         mapId,
-        topK = 3,
-        threshold = 0.4, // 降低阈值，更宽容地匹配
+        topK = 8,
+        threshold = 0.35, // 降低阈值，更宽容地匹配
       } = filters;
 
       const allResults = [];
